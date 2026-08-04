@@ -36,6 +36,21 @@ Accession sources (at least one required)
     --accessions
         Inline accessions separated by commas, semicolons or whitespace.
 
+Database integration
+--------------------
+    When --db is used, each successfully fetched sequence is also inserted
+    into the sequences table of that database (upsert) as it is downloaded,
+    so the database reflects the fetch immediately. Sequences fetched by an
+    earlier run (present in the output FASTA but missing from the database)
+    are backfilled before fetching starts, so re-running the same command
+    closes the gap without re-downloading anything. Accessions that cannot
+    be inserted (e.g. missing from the metadata table, or longer than the
+    sequences table CHECK allows) are skipped and reported. Pass
+    --no-update-db to keep the original FASTA-only behaviour.
+
+    When accessions come from --accessions-file or --accessions there is no
+    database to update, so only the FASTA file is written.
+
 The fetched FASTA file can later be concatenated with the original FASTA and
 passed to db/import_data.py as --fasta, or the ETL can be run with
 --fetch-missing which reuses this module.
@@ -378,6 +393,7 @@ def fetch_missing(
     batch_size=200,
     sleep_seconds=None,
     delimiter=DEFAULT_DELIMITER,
+    db_path=None,
 ):
     """
     Fetch missing accessions from NCBI, resumable across runs.
@@ -386,6 +402,14 @@ def fetch_missing(
     the output FASTA when no progress file exists) are skipped. Fetched
     sequences are appended to the output FASTA with headers conformed to the
     given delimiter.
+
+    When db_path is given, each successfully fetched sequence is also
+    inserted into the sequences table of that database (upsert) as it is
+    downloaded, so an interrupted run can be resumed and the database already
+    reflects the completed batches. Sequences that were fetched by an earlier
+    run (present in the output FASTA but missing from the database) are
+    backfilled into the database before fetching starts, so re-running the
+    same command closes the gap without re-downloading anything.
 
     Parameters
     ----------
@@ -406,6 +430,9 @@ def fetch_missing(
         0.1 with one.
     delimiter : str
         Header delimiter used to conform fetched headers.
+    db_path : str or None
+        SQLite database to insert fetched sequences into. If None, fetched
+        sequences are only appended to the output FASTA.
 
     Returns
     -------
@@ -428,10 +455,6 @@ def fetch_missing(
         if accession not in fetched
     ]
 
-    if not pending:
-        print("Nothing to fetch: all requested accessions are already done.")
-        return {}, []
-
     if sleep_seconds is None:
         sleep_seconds = 0.1 if api_key else 0.34
 
@@ -440,6 +463,28 @@ def fetch_missing(
 
     fetched_dict = {}
     failed = []
+    n_db_inserted = 0
+    n_db_backfilled = 0
+    db_skipped = []
+
+    if db_path is not None:
+        n_db_backfilled, n_db_already, backfill_skipped = (
+            sync_fetched_fasta_to_db(
+                db_path=db_path,
+                output_fasta=output_path,
+            )
+        )
+        db_skipped.extend(backfill_skipped)
+
+        if n_db_backfilled or n_db_already:
+            print(
+                f"  Database sync: inserted {n_db_backfilled} already-fetched "
+                f"sequences, {n_db_already} already present."
+            )
+
+    if not pending:
+        print("Nothing to fetch: all requested accessions are already done.")
+        return {}, []
 
     out_handle = output_path.open("a", encoding="utf-8")
 
@@ -458,6 +503,8 @@ def fetch_missing(
                 api_key=api_key,
                 sleep_seconds=sleep_seconds,
             )
+
+            new_fetched = {}
 
             for accession in batch:
                 record = batch_results.get(accession)
@@ -485,9 +532,20 @@ def fetch_missing(
                     out_handle.write(sequence[i:i + 80] + "\n")
 
                 fetched.add(accession)
-                fetched_dict[accession] = (description, sequence)
+
+                db_description = _split_header(header)[2]
+                fetched_dict[accession] = (db_description, sequence)
+                new_fetched[accession] = (db_description, sequence)
 
             save_progress(progress_file, fetched)
+
+            if db_path is not None and new_fetched:
+                inserted, skipped = insert_sequences_into_db(
+                    db_path=db_path,
+                    fetched_dict=new_fetched,
+                )
+                n_db_inserted += inserted
+                db_skipped.extend(skipped)
 
     except KeyboardInterrupt:
         print("\nInterrupted. Progress saved; re-run to resume.")
@@ -497,6 +555,20 @@ def fetch_missing(
     finally:
         out_handle.close()
 
+    if db_path is not None:
+        print(
+            f"  Inserted {n_db_backfilled + n_db_inserted} fetched "
+            f"sequences into {db_path}"
+        )
+
+        if db_skipped:
+            print(
+                f"  Skipped {len(db_skipped)} fetched sequences "
+                "(not inserted into the database):"
+            )
+            for entry in db_skipped[:10]:
+                print(f"    {entry['accession']}: {entry['reason']}")
+
     if failed:
         print(
             f"  Could not fetch {len(failed)} accessions "
@@ -504,6 +576,37 @@ def fetch_missing(
         )
 
     return fetched_dict, failed
+
+
+def build_sequence_rows(fetched_dict):
+    """
+    Convert fetched records into ETL-ready sequence row dictionaries.
+
+    Parameters
+    ----------
+    fetched_dict : dict
+        accession -> (description, normalised_sequence)
+
+    Returns
+    -------
+    list[dict]
+        Rows compatible with the sequence_rows format produced by
+        transform_seqdict in db/import_data.py.
+    """
+    rows = []
+
+    for accession, (description, sequence) in fetched_dict.items():
+        counts = count_ambiguous_bases(sequence)
+        rows.append({
+            "accession": accession,
+            "description": description,
+            "sequence": sequence,
+            "n_N": counts["n_N"],
+            "n_degenerate": counts["n_degenerate"],
+            "degenerate_breakdown": degenerate_breakdown_json(sequence),
+        })
+
+    return rows
 
 
 def fetch_and_build_sequence_rows(
@@ -533,20 +636,194 @@ def fetch_and_build_sequence_rows(
         delimiter=delimiter,
     )
 
-    rows = []
+    return build_sequence_rows(fetched_dict)
 
-    for accession, (description, sequence) in fetched_dict.items():
-        counts = count_ambiguous_bases(sequence)
-        rows.append({
-            "accession": accession,
-            "description": description,
-            "sequence": sequence,
-            "n_N": counts["n_N"],
-            "n_degenerate": counts["n_degenerate"],
-            "degenerate_breakdown": degenerate_breakdown_json(sequence),
-        })
 
-    return rows
+# ============================================================
+# DATABASE INTEGRATION
+# ============================================================
+
+SEQUENCES_TABLE_MAX_LENGTH = 30000
+
+_SEQUENCES_UPSERT_SQL = """
+INSERT INTO sequences (
+    accession,
+    description,
+    sequence,
+    n_N,
+    n_degenerate,
+    degenerate_breakdown
+)
+VALUES (
+    :accession,
+    :description,
+    :sequence,
+    :n_N,
+    :n_degenerate,
+    :degenerate_breakdown
+)
+ON CONFLICT(accession) DO UPDATE SET
+    description = excluded.description,
+    sequence = excluded.sequence,
+    n_N = excluded.n_N,
+    n_degenerate = excluded.n_degenerate,
+    degenerate_breakdown = excluded.degenerate_breakdown;
+"""
+
+
+def insert_sequences_into_db(db_path, fetched_dict):
+    """
+    Insert fetched sequences into the sequences table of a SQLite database.
+
+    The sequences table has a foreign key to metadata(accession), so only
+    accessions already present in the metadata table can be inserted. Records
+    that cannot be inserted (missing from metadata, or longer than the
+    sequences table CHECK allows) are skipped and returned for reporting.
+
+    Parameters
+    ----------
+    db_path : str
+        Path to a SQLite sequence database.
+
+    fetched_dict : dict
+        accession -> (description, normalised_sequence).
+
+    Returns
+    -------
+    tuple
+        (n_inserted, skipped) where skipped is a list of
+        {"accession": str, "reason": str} dictionaries.
+    """
+    if not fetched_dict:
+        return 0, []
+
+    conn = sqlite3.connect(db_path)
+    conn.execute("PRAGMA foreign_keys = ON;")
+
+    try:
+        placeholders = ",".join("?" for _ in fetched_dict)
+        cursor = conn.execute(
+            "SELECT accession FROM metadata "
+            f"WHERE accession IN ({placeholders})",
+            list(fetched_dict),
+        )
+        in_metadata = {row[0] for row in cursor.fetchall()}
+
+        insertable = {}
+        skipped = []
+
+        for accession, (description, sequence) in fetched_dict.items():
+            if accession not in in_metadata:
+                skipped.append({
+                    "accession": accession,
+                    "reason": "not present in the metadata table",
+                })
+                continue
+
+            if len(sequence) > SEQUENCES_TABLE_MAX_LENGTH:
+                skipped.append({
+                    "accession": accession,
+                    "reason": (
+                        f"sequence longer than "
+                        f"{SEQUENCES_TABLE_MAX_LENGTH} bp"
+                    ),
+                })
+                continue
+
+            insertable[accession] = (description, sequence)
+
+        rows = build_sequence_rows(insertable)
+
+        if rows:
+            conn.executemany(_SEQUENCES_UPSERT_SQL, rows)
+            conn.commit()
+
+        return len(rows), skipped
+
+    finally:
+        conn.close()
+
+
+def load_fetched_records(output_fasta):
+    """
+    Read the fetched FASTA file into {accession: (description, sequence)}.
+
+    Descriptions are extracted from the conformed headers (the part after the
+    accession delimiter) and sequences are normalised, matching what the ETL
+    stores when the fetched FASTA is re-imported.
+    """
+    path = Path(output_fasta)
+
+    if not path.exists():
+        return {}
+
+    records = {}
+
+    with path.open("r", encoding="utf-8") as handle:
+        for record in SeqIO.parse(handle, "fasta"):
+            _accession, _delimiter, description = _split_header(
+                str(record.description)
+            )
+            sequence = normalise_sequence(str(record.seq))
+
+            if record.id and sequence:
+                records[str(record.id)] = (description, sequence)
+
+    return records
+
+
+def sync_fetched_fasta_to_db(db_path, output_fasta):
+    """
+    Insert sequences from the fetched FASTA into the sequences table, skipping
+    accessions already present.
+
+    This backfills sequences downloaded by an earlier run (e.g. before --db
+    integration existed, or with --no-update-db) that are in the FASTA but
+    missing from the database. Re-running the fetch with --db therefore brings
+    the database up to date without re-downloading anything.
+
+    Parameters
+    ----------
+    db_path : str
+        Path to a SQLite sequence database.
+
+    output_fasta : str
+        FASTA file fetched sequences were appended to.
+
+    Returns
+    -------
+    tuple
+        (n_inserted, n_skipped_present, skipped)
+        skipped is a list of {"accession": str, "reason": str} dictionaries.
+    """
+    records = load_fetched_records(output_fasta)
+
+    if not records:
+        return 0, 0, []
+
+    conn = sqlite3.connect(db_path)
+    conn.execute("PRAGMA foreign_keys = ON;")
+
+    try:
+        placeholders = ",".join("?" for _ in records)
+        cursor = conn.execute(
+            "SELECT accession FROM sequences "
+            f"WHERE accession IN ({placeholders})",
+            list(records),
+        )
+        already_present = {row[0] for row in cursor.fetchall()}
+    finally:
+        conn.close()
+
+    to_insert = {
+        accession: value
+        for accession, value in records.items()
+        if accession not in already_present
+    }
+
+    n_inserted, skipped = insert_sequences_into_db(db_path, to_insert)
+
+    return n_inserted, len(records) - len(to_insert), skipped
 
 
 # ============================================================
@@ -580,6 +857,16 @@ def parse_args():
     source_group.add_argument(
         "--accessions",
         help="Inline accessions separated by commas, semicolons or whitespace."
+    )
+
+    parser.add_argument(
+        "--no-update-db",
+        action="store_true",
+        help=(
+            "When --db is used, fetched sequences are inserted into the "
+            "sequences table of that database as they are downloaded. Pass "
+            "this flag to keep the original FASTA-only behaviour."
+        )
     )
 
     parser.add_argument(
@@ -674,6 +961,11 @@ def main():
         delimiter = DEFAULT_DELIMITER
         print(f"Using default header delimiter: {delimiter!r}")
 
+    db_path = args.db if args.db and not args.no_update_db else None
+
+    if args.db and not args.no_update_db:
+        print(f"Fetched sequences will be inserted into: {args.db}")
+
     fetched_dict, still_missing = fetch_missing(
         accessions=accessions,
         output_fasta=args.output,
@@ -683,6 +975,7 @@ def main():
         batch_size=args.batch_size,
         sleep_seconds=args.sleep,
         delimiter=delimiter,
+        db_path=db_path,
     )
 
     print("Fetch summary")
@@ -691,6 +984,9 @@ def main():
     print(f"Still missing: {len(still_missing)}")
     print(f"Output FASTA: {args.output}")
     print(f"Progress file: {args.progress}")
+
+    if db_path is not None:
+        print(f"Database updated: {args.db}")
 
     if still_missing:
         print("Still-missing accessions:")

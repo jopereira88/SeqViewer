@@ -104,6 +104,16 @@ Accessions can also be supplied with `--accessions-file` (one per line) or
 detect the dominant header format so fetched headers conform to it. Fetched
 headers use the same `>ACCESSION |description` format as the source files.
 
+When `--db` is used, each successfully fetched sequence is also inserted into
+the `sequences` table of that database (upsert) as it is downloaded, so the
+database reflects the fetch immediately. Sequences fetched by an earlier run
+(present in the fetched FASTA but missing from the database) are backfilled
+before fetching starts, so re-running the same command closes the gap without
+re-downloading anything. Accessions that cannot be inserted (e.g. missing from
+the `metadata` table, or longer than the `sequences` table CHECK allows) are
+skipped and reported. Pass `--no-update-db` to keep the original FASTA-only
+behaviour.
+
 The fetched FASTA can be concatenated with the original file and passed to the
 ETL as `--fasta`, or the ETL can be run with `--fetch-missing` (which reuses the
 same resumable download).
