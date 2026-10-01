@@ -24,14 +24,21 @@ from services import (
     load_sequence_records_by_accessions,
     load_cluster_members,
     load_cluster_member_sequences,
-    load_cluster_member_sequences_for_cluster_subset,
+    load_cluster_metadata_members_for_cluster_subset,
+    load_cluster_metadata_clusters_for_cluster_subset,
+    iter_cluster_member_sequences_for_cluster_subset,
+    iter_cluster_metadata_members_for_cluster_subset,
     search_clusters,
     count_clusters,
+    get_assembly_links,
+    load_cluster_assembly_values,
 )
 from utils import (
     format_fasta,
     format_multifasta,
     build_cluster_zip,
+    build_cluster_zip_from_rows,
+    cluster_metadata_zip_bytes_from_rows,
     parse_accession_list,
 )
 
@@ -70,6 +77,199 @@ def _sequences_have_ambiguous_counts(db_path):
         conn.close()
 
     return {"n_N", "n_degenerate"} <= columns
+
+
+def _render_sequence_detail(db_path, selected_accession, detail):
+    """
+    Render the full detail view for one selected sequence.
+
+    Shows a summary column plus Metadata, Sequence, Ambiguous bases,
+    Cluster and Cluster members tabs.
+
+    Parameters
+    ----------
+    db_path : str
+        Path to SQLite database.
+
+    selected_accession : str
+        Accession of the selected sequence.
+
+    detail : dict
+        Full detail record from load_sequence_detail.
+    """
+    st.divider()
+    st.subheader(f"Selected accession: {selected_accession}")
+
+    def _int_value(key, default=0):
+        value = detail.get(key)
+        if value is None or pd.isna(value):
+            return default
+        return int(value)
+
+    left_col, right_col = st.columns([1, 2])
+
+    with left_col:
+        st.markdown("### Summary")
+
+        st.write(f"**Accession:** {detail.get('accession')}")
+        st.write(f"**Organism:** {detail.get('organism_name')}")
+        st.write(f"**Species:** {detail.get('species')}")
+        st.write(f"**Segment:** {detail.get('segment')}")
+        st.write(f"**Genotype:** {detail.get('genotype')}")
+        st.write(f"**Length:** {detail.get('length')}")
+        st.write(f"**N bases:** {_int_value('n_N')}")
+        st.write(f"**Degenerate bases:** {_int_value('n_degenerate')}")
+        st.write(f"**Host:** {detail.get('host')}")
+        st.write(f"**Country:** {detail.get('country')}")
+        st.write(
+            f"**Collection date:** {detail.get('collection_date')}"
+        )
+        st.write(f"**Release date:** {detail.get('release_date')}")
+
+        fasta_text = format_fasta(
+            accession=detail.get("accession"),
+            description=detail.get("description"),
+            sequence=detail.get("sequence")
+        )
+
+        st.download_button(
+            label="Download selected sequence as FASTA",
+            data=fasta_text,
+            file_name=f"{selected_accession}.fasta",
+            mime="text/plain",
+            disabled=(not bool(fasta_text))
+        )
+
+    with right_col:
+        tabs = st.tabs([
+            "Metadata",
+            "Sequence",
+            "Ambiguous bases",
+            "Cluster",
+            "Cluster members"
+        ])
+
+        with tabs[0]:
+            st.markdown("### Metadata")
+
+            metadata_fields = {
+                key: value
+                for key, value in detail.items()
+                if key not in {
+                    "sequence",
+                    "n_N",
+                    "n_degenerate",
+                    "degenerate_breakdown",
+                    "cluster_organism",
+                    "cluster_number",
+                    "identity_to_centroid",
+                    "centroid",
+                }
+            }
+
+            st.json(metadata_fields)
+
+        with tabs[1]:
+            st.markdown("### Sequence")
+
+            sequence = detail.get("sequence")
+
+            if sequence is None:
+                st.warning("No sequence found for this accession.")
+            else:
+                st.write(
+                    f"Sequence length in database: {len(sequence)}"
+                )
+                st.text_area(
+                    label="Sequence",
+                    value=sequence,
+                    height=300
+                )
+
+        with tabs[2]:
+            st.markdown("### Ambiguous bases")
+
+            sequence = detail.get("sequence")
+            n_n = _int_value("n_N")
+            n_degenerate = _int_value("n_degenerate")
+
+            raw_breakdown = detail.get("degenerate_breakdown")
+
+            if isinstance(raw_breakdown, str):
+                try:
+                    per_base = json.loads(raw_breakdown)
+                except (ValueError, TypeError):
+                    per_base = {}
+            else:
+                per_base = dict(raw_breakdown or {})
+
+            if sequence is not None:
+                st.write(f"**Sequence length:** {len(sequence)}")
+            st.write(f"**N bases:** {n_n}")
+            st.write(f"**Degenerate bases:** {n_degenerate}")
+
+            breakdown_rows = [
+                {"Base": base, "Count": count}
+                for base, count in per_base.items()
+            ]
+            breakdown_rows.append({"Base": "N", "Count": n_n})
+            breakdown_rows.append(
+                {"Base": "Total", "Count": n_degenerate + n_n}
+            )
+
+            st.dataframe(
+                pd.DataFrame(breakdown_rows),
+                use_container_width=True,
+                hide_index=True,
+            )
+
+        with tabs[3]:
+            st.markdown("### Cluster")
+
+            cluster_organism = detail.get("cluster_organism")
+            cluster_number = detail.get("cluster_number")
+            centroid = detail.get("centroid")
+            identity = detail.get("identity_to_centroid")
+
+            if cluster_number is None or pd.isna(cluster_number):
+                st.info(
+                    "No cluster information available for this accession."
+                )
+            else:
+                st.write(
+                    f"**Cluster organism:** {cluster_organism}"
+                )
+                st.write(
+                    f"**Cluster number:** {cluster_number}"
+                )
+                st.write(f"**Centroid:** {centroid}")
+                st.write(
+                    f"**Identity to centroid:** {identity}"
+                )
+
+        with tabs[4]:
+            st.markdown("### Cluster members")
+
+            cluster_organism = detail.get("cluster_organism")
+            cluster_number = detail.get("cluster_number")
+
+            if cluster_number is None or pd.isna(cluster_number):
+                st.info("No cluster selected.")
+            else:
+                members_df = load_cluster_members(
+                    db_path=db_path,
+                    organism=cluster_organism,
+                    cluster_number=cluster_number
+                )
+
+                st.write(f"**Cluster:** {cluster_number}")
+                st.write(f"**Members:** {len(members_df)}")
+
+                st.dataframe(
+                    members_df,
+                    use_container_width=True,
+                    hide_index=True
+                )
 
 
 # ============================================================
@@ -439,49 +639,26 @@ with tab_sequences:
             acc_selected_rows = acc_event.selection.rows
 
             if not acc_selected_rows:
-                st.info(
-                    "Select a row to view its per-base degenerate breakdown."
-                )
+                st.info("Select a row to view sequence details.")
             else:
                 acc_selected_row = records_df.iloc[acc_selected_rows[0]]
+                selected_accession = str(acc_selected_row["accession"])
 
-                st.divider()
-                st.subheader(
-                    f"Selected accession: {acc_selected_row['accession']}"
+                detail = load_sequence_detail(
+                    db_path=db_path,
+                    accession=selected_accession
                 )
 
-                st.write(
-                    f"**N bases:** {acc_selected_row.get('n_N', 0)}   "
-                    f"**Degenerate bases:** {acc_selected_row.get('n_degenerate', 0)}   "
-                    f"**Sequence length:** {acc_selected_row.get('sequence_length', 0)}"
-                )
-
-                raw_breakdown = acc_selected_row.get("degenerate_breakdown")
-
-                if isinstance(raw_breakdown, str):
-                    try:
-                        per_base = json.loads(raw_breakdown)
-                    except (ValueError, TypeError):
-                        per_base = {}
-                else:
-                    per_base = dict(raw_breakdown or {})
-
-                if per_base:
-                    breakdown_df = pd.DataFrame(
-                        {
-                            "Base": list(per_base.keys()),
-                            "Count": list(per_base.values()),
-                        }
-                    )
-                    st.write("### Per-base degenerate breakdown")
-                    st.dataframe(
-                        breakdown_df,
-                        use_container_width=True,
-                        hide_index=True,
+                if detail is None:
+                    st.error(
+                        f"Could not load detail for accession: "
+                        f"{selected_accession}"
                     )
                 else:
-                    st.info(
-                        "No degenerate base breakdown available for this record."
+                    _render_sequence_detail(
+                        db_path=db_path,
+                        selected_accession=selected_accession,
+                        detail=detail,
                     )
 
     else:
@@ -534,6 +711,7 @@ with tab_sequences:
             current_page = 0
             st.session_state.seq_page = 0
             st.session_state["seq_filter_key"] = seq_filter_key
+            st.session_state.pop("seq_detail_accession", None)
 
         st.session_state.seq_page = current_page
         offset = current_page * seq_page_size
@@ -594,7 +772,26 @@ with tab_sequences:
                 selection_mode="multi-row" if is_download_mode else "single-row",
             )
 
-            selected_rows = event.selection.rows
+            selected_rows = list(event.selection.rows)
+
+            # Preserve the selected accession across "Selection mode" toggles.
+            # The dataframe widget id depends on selection_mode, so Streamlit
+            # discards the row selection (and hides the detail panel) when the
+            # mode changes. Restore it here when we are back in detail view.
+            if not is_download_mode:
+                if selected_rows:
+                    st.session_state["seq_detail_accession"] = str(
+                        sequence_index_df.iloc[selected_rows[0]]["accession"]
+                    )
+                elif "seq_detail_accession" in st.session_state:
+                    restored_idx = sequence_index_df.index[
+                        sequence_index_df["accession"].astype(str)
+                        == st.session_state["seq_detail_accession"]
+                    ]
+                    if len(restored_idx):
+                        selected_rows = [restored_idx[0]]
+                    else:
+                        st.session_state.pop("seq_detail_accession", None)
 
             if is_download_mode:
                 # -- Multi-select download --
@@ -657,176 +854,11 @@ with tab_sequences:
                             f"{selected_accession}"
                         )
                     else:
-                        # -- Detail view --
-
-                        st.divider()
-
-                        st.subheader(
-                            f"Selected accession: {selected_accession}"
+                        _render_sequence_detail(
+                            db_path=db_path,
+                            selected_accession=selected_accession,
+                            detail=detail,
                         )
-
-                        left_col, right_col = st.columns([1, 2])
-
-                        with left_col:
-                            st.markdown("### Summary")
-
-                            st.write(
-                                f"**Accession:** {detail.get('accession')}"
-                            )
-                            st.write(
-                                f"**Organism:** {detail.get('organism_name')}"
-                            )
-                            st.write(
-                                f"**Species:** {detail.get('species')}"
-                            )
-                            st.write(
-                                f"**Segment:** {detail.get('segment')}"
-                            )
-                            st.write(
-                                f"**Genotype:** {detail.get('genotype')}"
-                            )
-                            st.write(f"**Length:** {detail.get('length')}")
-                            st.write(
-                                f"**N bases:** {selected_row.get('n_N', 0)}"
-                            )
-                            st.write(
-                                f"**Degenerate bases:** "
-                                f"{selected_row.get('n_degenerate', 0)}"
-                            )
-                            st.write(f"**Host:** {detail.get('host')}")
-                            st.write(f"**Country:** {detail.get('country')}")
-                            st.write(
-                                f"**Collection date:** "
-                                f"{detail.get('collection_date')}"
-                            )
-                            st.write(
-                                f"**Release date:** "
-                                f"{detail.get('release_date')}"
-                            )
-
-                            fasta_text = format_fasta(
-                                accession=detail.get("accession"),
-                                description=detail.get("description"),
-                                sequence=detail.get("sequence")
-                            )
-
-                            st.download_button(
-                                label=(
-                                    "Download selected sequence as FASTA"
-                                ),
-                                data=fasta_text,
-                                file_name=f"{selected_accession}.fasta",
-                                mime="text/plain",
-                                disabled=(not bool(fasta_text))
-                            )
-
-                        with right_col:
-                            tabs = st.tabs([
-                                "Metadata",
-                                "Sequence",
-                                "Cluster",
-                                "Cluster members"
-                            ])
-
-                            with tabs[0]:
-                                st.markdown("### Metadata")
-
-                                metadata_fields = {
-                                    key: value
-                                    for key, value in detail.items()
-                                    if key not in {"sequence"}
-                                }
-
-                                st.json(metadata_fields)
-
-                            with tabs[1]:
-                                st.markdown("### Sequence")
-
-                                sequence = detail.get("sequence")
-
-                                if sequence is None:
-                                    st.warning(
-                                        "No sequence found for this "
-                                        "accession."
-                                    )
-                                else:
-                                    st.write(
-                                        f"Sequence length in database: "
-                                        f"{len(sequence)}"
-                                    )
-                                    st.text_area(
-                                        label="Sequence",
-                                        value=sequence,
-                                        height=300
-                                    )
-
-                            with tabs[2]:
-                                st.markdown("### Cluster")
-
-                                cluster_organism = selected_row.get(
-                                    "cluster_organism"
-                                )
-                                cluster_number = selected_row.get(
-                                    "cluster_number"
-                                )
-                                centroid = selected_row.get("centroid")
-                                identity = selected_row.get(
-                                    "identity_to_centroid"
-                                )
-
-                                if pd.isna(cluster_number):
-                                    st.info(
-                                        "No cluster information available "
-                                        "for this accession."
-                                    )
-                                else:
-                                    st.write(
-                                        f"**Cluster organism:** "
-                                        f"{cluster_organism}"
-                                    )
-                                    st.write(
-                                        f"**Cluster number:** "
-                                        f"{cluster_number}"
-                                    )
-                                    st.write(
-                                        f"**Centroid:** {centroid}"
-                                    )
-                                    st.write(
-                                        f"**Identity to centroid:** "
-                                        f"{identity}"
-                                    )
-
-                            with tabs[3]:
-                                st.markdown("### Cluster members")
-
-                                cluster_organism = selected_row.get(
-                                    "cluster_organism"
-                                )
-                                cluster_number = selected_row.get(
-                                    "cluster_number"
-                                )
-
-                                if pd.isna(cluster_number):
-                                    st.info("No cluster selected.")
-                                else:
-                                    members_df = load_cluster_members(
-                                        db_path=db_path,
-                                        organism=cluster_organism,
-                                        cluster_number=cluster_number
-                                    )
-
-                                    st.write(
-                                        f"**Cluster:** {cluster_number}"
-                                    )
-                                    st.write(
-                                        f"**Members:** {len(members_df)}"
-                                    )
-
-                                    st.dataframe(
-                                        members_df,
-                                        use_container_width=True,
-                                        hide_index=True
-                                    )
 
 
 # ============================================================
@@ -838,11 +870,12 @@ with tab_clusters:
     st.subheader("Cluster Browser")
 
     st.caption(
-        "Search clusters by organism, cluster number or centroid. "
-        "Select a cluster to view members and download a multifasta file."
+        "Search clusters by organism, cluster number, centroid or assembly. "
+        "Select a cluster to view members, its contributing assemblies, "
+        "linked clusters and download exports."
     )
 
-    col_cluster_search, col_centroid_search = st.columns(2)
+    col_cluster_search, col_centroid_search, col_assembly_search = st.columns(3)
 
     with col_cluster_search:
         cluster_search_term = st.text_input(
@@ -856,6 +889,15 @@ with tab_clusters:
             "Search centroid accession",
             value="",
             key="centroid_search_input"
+        )
+
+    with col_assembly_search:
+        assembly_search_term = st.text_input(
+            "Search assembly",
+            value="",
+            key="assembly_search_input",
+            help="Show clusters containing sequences from assemblies "
+                 "matching this accession."
         )
 
     # -- Pagination state --
@@ -881,6 +923,7 @@ with tab_clusters:
         host_filter=host_filter,
         country_filter=country_filter,
         min_n_sequences=min_cluster_size,
+        assembly_search=assembly_search_term,
     )
 
     total_pages = max(1, (total_clusters + page_size - 1) // page_size) if total_clusters > 0 else 1
@@ -889,6 +932,7 @@ with tab_clusters:
     # Reset page and stale downloads when filters change
     filter_key = (
         cluster_organism_filter, cluster_search_term, centroid_search_term,
+        assembly_search_term,
         segment_filter, genotype_filter, ha_subtype_filter, na_subtype_filter,
         host_filter, country_filter,
         min_cluster_size, page_size
@@ -901,6 +945,8 @@ with tab_clusters:
         st.session_state.pop("centroids_count", None)
         st.session_state.pop("clusters_zip", None)
         st.session_state.pop("clusters_zip_info", None)
+        st.session_state.pop("cluster_metadata_zip", None)
+        st.session_state.pop("cluster_metadata_zip_info", None)
 
     if total_clusters == 0:
         st.warning("No clusters found for the selected filters.")
@@ -936,13 +982,15 @@ with tab_clusters:
             host_filter=host_filter,
             country_filter=country_filter,
             min_n_sequences=min_cluster_size,
+            assembly_search=assembly_search_term,
+            include_assembly_columns=True,
             limit=page_size,
             offset=offset,
         )
 
         # -- On-demand bulk downloads (all matching clusters, not just current page) --
 
-        dl_cols = st.columns(2)
+        dl_cols = st.columns(3)
 
         with dl_cols[0]:
             if st.button("Generate centroids FASTA", key="gen_centroids_fasta"):
@@ -958,6 +1006,7 @@ with tab_clusters:
                     host_filter=host_filter,
                     country_filter=country_filter,
                     min_n_sequences=min_cluster_size,
+                    assembly_search=assembly_search_term,
                     limit=None,
                 )
                 centroid_accessions = all_clusters_df["centroid"].dropna().unique().tolist()
@@ -991,24 +1040,114 @@ with tab_clusters:
                     host_filter=host_filter,
                     country_filter=country_filter,
                     min_n_sequences=min_cluster_size,
+                    assembly_search=assembly_search_term,
                     limit=None,
                 )
                 all_cluster_pairs = list(
                     zip(all_clusters_df["organism"], all_clusters_df["cluster_number"])
                 )
-                all_members_df = load_cluster_member_sequences_for_cluster_subset(
-                    db_path=db_path,
-                    cluster_pairs=all_cluster_pairs,
+                # Streamed rather than loaded as a dataframe: a whole-dataset export is
+                # over a million sequences and needs gigabytes as a dataframe.
+                zip_bytes, n_sequences = build_cluster_zip_from_rows(
+                    cluster_keys=all_cluster_pairs,
+                    rows=iter_cluster_member_sequences_for_cluster_subset(
+                        db_path=db_path,
+                        cluster_pairs=all_cluster_pairs,
+                        segment_filter=segment_filter,
+                        genotype_filter=genotype_filter,
+                        ha_subtype_filter=ha_subtype_filter,
+                        na_subtype_filter=na_subtype_filter,
+                        host_filter=host_filter,
+                        country_filter=country_filter,
+                    ),
                 )
-                zip_bytes = build_cluster_zip(all_members_df)
                 st.session_state["clusters_zip"] = zip_bytes
-                st.session_state["clusters_zip_info"] = f"{len(all_cluster_pairs)} clusters, {len(all_members_df)} sequences"
+                st.session_state["clusters_zip_info"] = f"{len(all_cluster_pairs)} clusters, {n_sequences} sequences"
 
             if "clusters_zip" in st.session_state:
                 st.download_button(
                     label=f"Download all clusters as zip ({st.session_state['clusters_zip_info']})",
                     data=st.session_state["clusters_zip"],
                     file_name="clusters.zip",
+                    mime="application/zip",
+                )
+
+        with dl_cols[2]:
+            if st.button("Generate metadata TSV zip", key="gen_cluster_metadata_zip"):
+                all_clusters_df = search_clusters(
+                    db_path=db_path,
+                    organism_search=cluster_organism_filter if cluster_organism_filter != "All" else "",
+                    cluster_search=cluster_search_term,
+                    centroid_search=centroid_search_term,
+                    segment_filter=segment_filter,
+                    genotype_filter=genotype_filter,
+                    ha_subtype_filter=ha_subtype_filter,
+                    na_subtype_filter=na_subtype_filter,
+                    host_filter=host_filter,
+                    country_filter=country_filter,
+                    min_n_sequences=min_cluster_size,
+                    assembly_search=assembly_search_term,
+                    limit=None,
+                )
+                all_cluster_pairs = list(
+                    zip(all_clusters_df["organism"], all_clusters_df["cluster_number"])
+                )
+                metadata_clusters_df = load_cluster_metadata_clusters_for_cluster_subset(
+                    db_path=db_path,
+                    cluster_pairs=all_cluster_pairs,
+                    segment_filter=segment_filter,
+                    genotype_filter=genotype_filter,
+                    ha_subtype_filter=ha_subtype_filter,
+                    na_subtype_filter=na_subtype_filter,
+                    host_filter=host_filter,
+                    country_filter=country_filter,
+                )
+                metadata_member_columns = [
+                    "organism",
+                    "cluster_number",
+                    "centroid",
+                    "accession",
+                    "assembly",
+                    "segment",
+                    "genotype",
+                    "ha_subtype",
+                    "na_subtype",
+                    "host",
+                    "country",
+                    "collection_date",
+                    "length",
+                    "identity_to_centroid",
+                ]
+
+                # members.tsv is streamed from a cursor rather than
+                # built as a dataframe: a whole-dataset export is over a
+                # million rows and the dataframe would cost about 1.5 GB.
+                member_rows = iter_cluster_metadata_members_for_cluster_subset(
+                    db_path=db_path,
+                    cluster_pairs=all_cluster_pairs,
+                    segment_filter=segment_filter,
+                    genotype_filter=genotype_filter,
+                    ha_subtype_filter=ha_subtype_filter,
+                    na_subtype_filter=na_subtype_filter,
+                    host_filter=host_filter,
+                    country_filter=country_filter,
+                )
+                metadata_zip_bytes, n_members = cluster_metadata_zip_bytes_from_rows(
+                    clusters_df=metadata_clusters_df,
+                    member_columns=metadata_member_columns,
+                    member_rows=member_rows,
+                )
+                st.session_state["cluster_metadata_zip"] = metadata_zip_bytes
+                st.session_state["cluster_metadata_zip_info"] = (
+                    f"{len(metadata_clusters_df)} clusters, "
+                    f"{n_members} members"
+                )
+
+            if "cluster_metadata_zip" in st.session_state:
+                st.download_button(
+                    label=f"Download cluster + member metadata ({st.session_state['cluster_metadata_zip_info']})",
+                    data=st.session_state["cluster_metadata_zip"],
+                    file_name="cluster_metadata.zip",
                     mime="application/zip",
                 )
 
@@ -1046,12 +1185,33 @@ with tab_clusters:
             info_cols[2].metric("Members (filtered)", sel_n_sequences)
             info_cols[3].metric("Members (total)", sel_full_size)
 
+            sel_n_assemblies = cluster_selected_row.get("n_assemblies")
+            sel_dominant_assembly = cluster_selected_row.get("dominant_assembly")
+            sel_assemblies_preview = cluster_selected_row.get("assemblies_preview")
+
+            if pd.notna(sel_n_assemblies):
+                assembly_cols = st.columns(2)
+                assembly_cols[0].metric("Assemblies", int(sel_n_assemblies))
+                assembly_cols[1].metric(
+                    "Dominant assembly",
+                    sel_dominant_assembly if pd.notna(sel_dominant_assembly) else "-",
+                )
+
             st.write(f"**Centroid:** {sel_centroid}")
+
+            if isinstance(sel_assemblies_preview, str) and sel_assemblies_preview:
+                st.caption(f"Assemblies: {sel_assemblies_preview}")
 
             members_seq_df = load_cluster_member_sequences(
                 db_path=db_path,
                 organism=sel_organism,
-                cluster_number=sel_cluster_number
+                cluster_number=sel_cluster_number,
+                segment_filter=segment_filter,
+                genotype_filter=genotype_filter,
+                ha_subtype_filter=ha_subtype_filter,
+                na_subtype_filter=na_subtype_filter,
+                host_filter=host_filter,
+                country_filter=country_filter,
             )
 
             st.write(f"**Sequences loaded:** {len(members_seq_df)}")
@@ -1067,8 +1227,66 @@ with tab_clusters:
                 )
 
                 with st.expander("Preview sequences"):
+                    preview_cols = [
+                        column
+                        for column in [
+                            "accession",
+                            "description",
+                            "assembly",
+                            "identity_to_centroid",
+                        ]
+                        if column in members_seq_df.columns
+                    ]
+
                     st.dataframe(
-                        members_seq_df[["accession", "description", "identity_to_centroid"]].head(50),
+                        members_seq_df[preview_cols].head(50),
+                        use_container_width=True,
+                        hide_index=True
+                    )
+
+            with st.expander("Contributing assemblies"):
+                assemblies_df = load_cluster_assembly_values(
+                    db_path=db_path,
+                    organism=sel_organism,
+                    cluster_number=sel_cluster_number,
+                )
+
+                if assemblies_df.empty:
+                    st.info("No assembly data available for this cluster.")
+                else:
+                    if pd.notna(sel_n_assemblies) and len(assemblies_df) < int(
+                        sel_n_assemblies
+                    ):
+                        st.caption(
+                            f"Showing the {len(assemblies_df)} largest of "
+                            f"{int(sel_n_assemblies)} assemblies."
+                        )
+
+                    st.dataframe(
+                        assemblies_df,
+                        use_container_width=True,
+                        hide_index=True
+                    )
+
+            with st.expander("Linked clusters"):
+                linked_df = get_assembly_links(
+                    db_path=db_path,
+                    organism=sel_organism,
+                    cluster_number=sel_cluster_number,
+                )
+
+                if linked_df.empty:
+                    st.info(
+                        "No clusters are linked to this cluster through "
+                        "shared assemblies."
+                    )
+                else:
+                    st.caption(
+                        "Clusters containing sequences from assemblies also "
+                        "found in this cluster, strongest link first."
+                    )
+                    st.dataframe(
+                        linked_df,
                         use_container_width=True,
                         hide_index=True
                     )

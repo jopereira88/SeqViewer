@@ -28,6 +28,17 @@ from services.cluster_service import (
     load_cluster_background_counts_for_cluster_subset,
     load_cluster_length_stats_for_cluster_subset,
     load_cluster_member_sequences_for_cluster_subset,
+    load_cluster_metadata_members_for_cluster_subset,
+    load_cluster_metadata_clusters_for_cluster_subset,
+    iter_cluster_member_sequences_for_cluster_subset,
+    iter_cluster_metadata_members_for_cluster_subset,
+)
+
+from services.assembly_service import (
+    get_assembly_links,
+    load_assembly_link_index,
+    load_cluster_assembly_values,
+    AssemblyLinkIndex,
 )
 
 __all__ = [
@@ -51,4 +62,13 @@ __all__ = [
     "load_cluster_background_counts_for_cluster_subset",
     "load_cluster_length_stats_for_cluster_subset",
     "load_cluster_member_sequences_for_cluster_subset",
+    "load_cluster_metadata_members_for_cluster_subset",
+    "load_cluster_metadata_clusters_for_cluster_subset",
+    "iter_cluster_member_sequences_for_cluster_subset",
+    "iter_cluster_metadata_members_for_cluster_subset",
+    # Assembly
+    "get_assembly_links",
+    "load_assembly_link_index",
+    "load_cluster_assembly_values",
+    "AssemblyLinkIndex",
 ]

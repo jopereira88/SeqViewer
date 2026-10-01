@@ -34,9 +34,22 @@ def load_cluster_members(db_path, organism, cluster_number):
     )
 
 
-def load_cluster_member_sequences(db_path, organism, cluster_number):
+def load_cluster_member_sequences(
+    db_path,
+    organism,
+    cluster_number,
+    segment_filter="All",
+    genotype_filter="All",
+    ha_subtype_filter="All",
+    na_subtype_filter="All",
+    host_filter="All",
+    country_filter="All"
+):
     """
     Load sequences for all members of a selected cluster.
+
+    Metadata filters are applied at sequence level, so the returned rows
+    match the filtered counts reported for the cluster.
 
     Parameters
     ----------
@@ -58,6 +71,12 @@ def load_cluster_member_sequences(db_path, organism, cluster_number):
         db_path=db_path,
         organism=organism,
         cluster_number=cluster_number,
+        segment_filter=segment_filter,
+        genotype_filter=genotype_filter,
+        ha_subtype_filter=ha_subtype_filter,
+        na_subtype_filter=na_subtype_filter,
+        host_filter=host_filter,
+        country_filter=country_filter,
     )
 
 
@@ -74,6 +93,8 @@ def search_clusters(
     country_filter="All",
     min_n_sequences=None,
     max_n_sequences=None,
+    assembly_search="",
+    include_assembly_columns=False,
     limit=500,
     offset=0
 ):
@@ -118,6 +139,13 @@ def search_clusters(
     max_n_sequences : int or None
         Maximum number of sequences.
 
+    assembly_search : str
+        Assembly accession search term.
+
+    include_assembly_columns : bool
+        Whether to append n_assemblies, dominant_assembly and
+        assemblies_preview to the result.
+
     limit : int
         Maximum number of clusters to return.
 
@@ -142,6 +170,8 @@ def search_clusters(
         country_filter=country_filter,
         min_n_sequences=min_n_sequences,
         max_n_sequences=max_n_sequences,
+        assembly_search=assembly_search,
+        include_assembly_columns=include_assembly_columns,
         limit=limit,
         offset=offset,
     )
@@ -160,6 +190,7 @@ def count_clusters(
     country_filter="All",
     min_n_sequences=None,
     max_n_sequences=None,
+    assembly_search="",
 ):
     """
     Count clusters matching search filters without loading result rows.
@@ -182,6 +213,7 @@ def count_clusters(
         country_filter=country_filter,
         min_n_sequences=min_n_sequences,
         max_n_sequences=max_n_sequences,
+        assembly_search=assembly_search,
     )
 
 
@@ -459,6 +491,174 @@ def load_cluster_member_sequences_for_cluster_subset(
         Member sequences dataframe.
     """
     return _q.load_cluster_member_sequences_for_cluster_subset(
+        db_path=db_path,
+        cluster_pairs=cluster_pairs,
+        segment_filter=segment_filter,
+        genotype_filter=genotype_filter,
+        ha_subtype_filter=ha_subtype_filter,
+        na_subtype_filter=na_subtype_filter,
+        host_filter=host_filter,
+        country_filter=country_filter,
+    )
+
+
+def load_cluster_metadata_members_for_cluster_subset(
+    db_path,
+    cluster_pairs,
+    segment_filter="All",
+    genotype_filter="All",
+    ha_subtype_filter="All",
+    na_subtype_filter="All",
+    host_filter="All",
+    country_filter="All"
+):
+    """
+    Load per-sequence metadata for a subset of clusters.
+
+    Includes the assembly of each sequence.
+
+    Parameters
+    ----------
+    db_path : str
+        Path to SQLite database.
+
+    cluster_pairs : list[tuple[str, str]]
+        List of (organism, cluster_number) pairs.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Member metadata dataframe.
+    """
+    return _q.load_cluster_metadata_members_for_cluster_subset(
+        db_path=db_path,
+        cluster_pairs=cluster_pairs,
+        segment_filter=segment_filter,
+        genotype_filter=genotype_filter,
+        ha_subtype_filter=ha_subtype_filter,
+        na_subtype_filter=na_subtype_filter,
+        host_filter=host_filter,
+        country_filter=country_filter,
+    )
+
+
+def load_cluster_metadata_clusters_for_cluster_subset(
+    db_path,
+    cluster_pairs,
+    segment_filter="All",
+    genotype_filter="All",
+    ha_subtype_filter="All",
+    na_subtype_filter="All",
+    host_filter="All",
+    country_filter="All"
+):
+    """
+    Load cluster-level metadata for a subset of clusters.
+
+    Includes n_assemblies, dominant_assembly and assemblies_preview.
+
+    Parameters
+    ----------
+    db_path : str
+        Path to SQLite database.
+
+    cluster_pairs : list[tuple[str, str]]
+        List of (organism, cluster_number) pairs.
+
+    Returns
+    -------
+    pandas.DataFrame
+        Cluster metadata dataframe.
+    """
+    return _q.load_cluster_metadata_clusters_for_cluster_subset(
+        db_path=db_path,
+        cluster_pairs=cluster_pairs,
+        segment_filter=segment_filter,
+        genotype_filter=genotype_filter,
+        ha_subtype_filter=ha_subtype_filter,
+        na_subtype_filter=na_subtype_filter,
+        host_filter=host_filter,
+        country_filter=country_filter,
+    )
+
+
+def iter_cluster_member_sequences_for_cluster_subset(
+    db_path,
+    cluster_pairs,
+    segment_filter="All",
+    genotype_filter="All",
+    ha_subtype_filter="All",
+    na_subtype_filter="All",
+    host_filter="All",
+    country_filter="All"
+):
+    """
+    Yield member sequences for a subset of clusters, one row at a time.
+
+    Same rows, ordering and filters as
+    load_cluster_member_sequences_for_cluster_subset, without building a
+    dataframe. Bulk FASTA exports use this because a whole-dataset export is
+    over a million sequences.
+
+    Parameters
+    ----------
+    db_path : str
+        Path to SQLite database.
+
+    cluster_pairs : list[tuple[str, str]]
+        List of (organism, cluster_number) pairs.
+
+    Returns
+    -------
+    generator
+        (organism, cluster_number, accession, description, assembly,
+        sequence) rows grouped by cluster.
+    """
+    return _q.iter_cluster_member_sequences_for_cluster_subset(
+        db_path=db_path,
+        cluster_pairs=cluster_pairs,
+        segment_filter=segment_filter,
+        genotype_filter=genotype_filter,
+        ha_subtype_filter=ha_subtype_filter,
+        na_subtype_filter=na_subtype_filter,
+        host_filter=host_filter,
+        country_filter=country_filter,
+    )
+
+
+def iter_cluster_metadata_members_for_cluster_subset(
+    db_path,
+    cluster_pairs,
+    segment_filter="All",
+    genotype_filter="All",
+    ha_subtype_filter="All",
+    na_subtype_filter="All",
+    host_filter="All",
+    country_filter="All"
+):
+    """
+    Yield per-sequence metadata for a subset of clusters, one row at a time.
+
+    Same rows, ordering and filters as
+    load_cluster_metadata_members_for_cluster_subset, without building a
+    dataframe. Bulk metadata exports use this because a whole-dataset export
+    is over a million rows.
+
+    Parameters
+    ----------
+    db_path : str
+        Path to SQLite database.
+
+    cluster_pairs : list[tuple[str, str]]
+        List of (organism, cluster_number) pairs.
+
+    Returns
+    -------
+    generator
+        Per-sequence metadata rows in the column order of
+        load_cluster_metadata_members_for_cluster_subset.
+    """
+    return _q.iter_cluster_metadata_members_for_cluster_subset(
         db_path=db_path,
         cluster_pairs=cluster_pairs,
         segment_filter=segment_filter,

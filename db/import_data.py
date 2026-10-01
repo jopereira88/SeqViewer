@@ -1363,6 +1363,161 @@ def build_cluster_filter_count_rows(
     return rows
 
 
+def build_cluster_assembly_rows(
+    metadata_rows,
+    cluster_rows,
+    cluster_composition_rows
+):
+    """
+    Build rows for cluster_assembly.
+
+    One row per observed combination:
+    organism, cluster_number, centroid, assembly, segment.
+
+    Every sequence must belong to an assembly; sequences whose metadata
+    assembly is missing are skipped here and reported by
+    compute_assembly_gaps().
+    """
+    metadata_by_accession, centroid_by_cluster, members_by_cluster = build_lookup_tables(
+        metadata_rows=metadata_rows,
+        cluster_rows=cluster_rows,
+        cluster_composition_rows=cluster_composition_rows
+    )
+
+    aggregate = Counter()
+    centroid_assembly_keys = set()
+
+    for cluster_key, accessions in members_by_cluster.items():
+        organism, cluster_number = cluster_key
+        centroid = centroid_by_cluster[cluster_key]
+
+        for accession in accessions:
+            metadata = metadata_by_accession.get(accession)
+
+            if metadata is None:
+                continue
+
+            assembly = clean_derived_value(metadata.get("assembly"))
+            segment = clean_derived_value(metadata.get("segment"))
+
+            key = (
+                organism,
+                cluster_number,
+                centroid,
+                assembly,
+                segment
+            )
+
+            aggregate[key] += 1
+
+            if accession == centroid:
+                centroid_assembly_keys.add(key)
+
+    rows = []
+
+    for (
+        organism,
+        cluster_number,
+        centroid,
+        assembly,
+        segment
+    ), n_sequences in aggregate.items():
+
+        key = (organism, cluster_number, centroid, assembly, segment)
+
+        rows.append({
+            "organism": organism,
+            "cluster_number": cluster_number,
+            "centroid": centroid,
+            "assembly": assembly,
+            "segment": segment,
+            "n_sequences": n_sequences,
+            "is_centroid_assembly": 1 if key in centroid_assembly_keys else 0,
+        })
+
+    return rows
+
+
+def build_cluster_assembly_link_rows(
+    metadata_rows,
+    cluster_rows,
+    cluster_composition_rows
+):
+    """
+    Build rows for cluster_assembly_links.
+
+    One row per unique cluster-cluster link, where n_connections is the
+    number of assemblies shared by both clusters.
+
+    Clusters are linked when they hold sequences from a common assembly.
+    Because an assembly contributes at most one cluster per segment, and
+    because each assembly spans one cluster per segment, an assembly
+    links every pair of its clusters together.
+
+    Each link is stored once with the lexicographically smaller cluster
+    key first, so the primary key is symmetric-safe. Self-links are
+    skipped.
+    """
+    cluster_assembly_rows = build_cluster_assembly_rows(
+        metadata_rows=metadata_rows,
+        cluster_rows=cluster_rows,
+        cluster_composition_rows=cluster_composition_rows
+    )
+
+    segment_counter_by_cluster = defaultdict(Counter)
+
+    for row in cluster_assembly_rows:
+        cluster_key = (row["organism"], row["cluster_number"])
+
+        segment_counter_by_cluster[cluster_key][row["segment"]] += (
+            row["n_sequences"]
+        )
+
+    # Mirror cluster_summary.segment so the two tables never disagree.
+    cluster_segment_by_key = {
+        cluster_key: infer_cluster_segment(segment_counter)
+        for cluster_key, segment_counter in segment_counter_by_cluster.items()
+    }
+
+    clusters_by_assembly = defaultdict(set)
+
+    for row in cluster_assembly_rows:
+        cluster_key = (row["organism"], row["cluster_number"])
+
+        clusters_by_assembly[row["assembly"]].add(cluster_key)
+
+    link_counts = Counter()
+
+    for cluster_keys in clusters_by_assembly.values():
+        if len(cluster_keys) < 2:
+            continue
+
+        sorted_keys = sorted(cluster_keys)
+
+        for i in range(len(sorted_keys)):
+            first_key = sorted_keys[i]
+
+            for j in range(i + 1, len(sorted_keys)):
+                link_counts[(first_key, sorted_keys[j])] += 1
+
+    rows = []
+
+    for (first_key, second_key), n_connections in link_counts.items():
+        rows.append({
+            "organism": first_key[0],
+            "cluster_number": first_key[1],
+            "linked_organism": second_key[0],
+            "linked_cluster_number": second_key[1],
+            "linked_cluster_segment": cluster_segment_by_key.get(
+                second_key,
+                "Unknown"
+            ),
+            "n_connections": n_connections,
+        })
+
+    return rows
+
+
 def build_derived_cluster_rows(
     metadata_rows,
     cluster_rows,
@@ -1378,7 +1533,9 @@ def build_derived_cluster_rows(
             "cluster_summary": [...],
             "cluster_background_counts": [...],
             "cluster_descriptors": [...],
-            "cluster_filter_counts": [...]
+            "cluster_filter_counts": [...],
+            "cluster_assembly": [...],
+            "cluster_assembly_links": [...]
         }
     """
     cluster_summary_rows = build_cluster_summary_rows(
@@ -1405,11 +1562,25 @@ def build_derived_cluster_rows(
         cluster_composition_rows=cluster_composition_rows
     )
 
+    cluster_assembly_rows = build_cluster_assembly_rows(
+        metadata_rows=metadata_rows,
+        cluster_rows=cluster_rows,
+        cluster_composition_rows=cluster_composition_rows
+    )
+
+    cluster_assembly_link_rows = build_cluster_assembly_link_rows(
+        metadata_rows=metadata_rows,
+        cluster_rows=cluster_rows,
+        cluster_composition_rows=cluster_composition_rows
+    )
+
     return {
         "cluster_summary": cluster_summary_rows,
         "cluster_background_counts": cluster_background_count_rows,
         "cluster_descriptors": cluster_descriptor_rows,
         "cluster_filter_counts": cluster_filter_count_rows,
+        "cluster_assembly": cluster_assembly_rows,
+        "cluster_assembly_links": cluster_assembly_link_rows,
     }
 
 
@@ -1612,6 +1783,80 @@ def report_record_gaps(gaps):
             print(f"    {label} ({len(accessions)}): {preview}{extra}")
 
 
+def compute_assembly_gaps(metadata_rows, cluster_composition_rows):
+    """
+    Find cluster members whose metadata is missing an assembly.
+
+    Every sequence must be part of an assembly, because assembly is the
+    association point between clusters and genomes. Sequences with a
+    missing assembly are dropped from cluster_assembly by the ETL, so
+    they would silently disappear from assembly-filtered results.
+
+    Returns
+    -------
+    dict
+        {
+            species_key: {
+                "missing_assembly": [accession, ...]
+            }
+        }
+    """
+    assembly_by_accession = {}
+
+    for row in metadata_rows:
+        assembly = row.get("assembly")
+
+        if assembly is None:
+            continue
+
+        assembly = str(assembly).strip()
+
+        if assembly:
+            assembly_by_accession[row["accession"]] = assembly
+
+    gaps = defaultdict(list)
+
+    for row in cluster_composition_rows:
+        accession = row["accession"]
+
+        if accession in assembly_by_accession:
+            continue
+
+        gaps[species_key_for_row({"species": row.get("organism")})].append(
+            accession
+        )
+
+    return {
+        key: {"missing_assembly": sorted(set(accessions))}
+        for key, accessions in sorted(gaps.items())
+    }
+
+
+def report_assembly_gaps(gaps):
+    """
+    Print a human-readable summary of missing-assembly sequences.
+    """
+    total = sum(
+        len(details["missing_assembly"])
+        for details in gaps.values()
+    )
+
+    if not gaps:
+        print("Assembly completeness: every cluster member belongs to an assembly.")
+        return
+
+    print("Assembly completeness gaps")
+    print("--------------------------")
+    print(f"Sequences missing an assembly: {total}")
+
+    for key, details in gaps.items():
+        accessions = details["missing_assembly"]
+        preview = ", ".join(accessions[:10])
+        extra = f" ... (+{len(accessions) - 10} more)" if len(accessions) > 10 else ""
+        print(f"  Species '{key}':")
+        print(f"    missing assembly ({len(accessions)}): {preview}{extra}")
+
+
 def missing_fasta_accessions(gaps):
     """
     Flatten the set of accessions missing a FASTA sequence across species.
@@ -1660,6 +1905,21 @@ def validate_species_record_completeness(
             "Use --fetch-missing to download missing sequences from NCBI, or "
             "run with --record-completeness warn to continue. "
             f"First missing FASTA examples: {first['missing_from_fasta'][:10]}"
+        )
+
+    assembly_gaps = compute_assembly_gaps(
+        metadata_rows=metadata_rows,
+        cluster_composition_rows=cluster_composition_rows,
+    )
+
+    report_assembly_gaps(assembly_gaps)
+
+    if mode == "fail" and assembly_gaps:
+        first = next(iter(assembly_gaps.values()))
+        raise ValueError(
+            "Assembly completeness check failed: some sequences do not belong "
+            "to an assembly, so they are excluded from cluster_assembly. "
+            f"First missing assembly examples: {first['missing_assembly'][:10]}"
         )
 
     return gaps
@@ -2232,6 +2492,90 @@ def load_cluster_filter_counts(conn, cluster_filter_count_rows):
 
     return len(cluster_filter_count_rows)
 
+
+def load_cluster_assembly(conn, cluster_assembly_rows):
+    """
+    Load rows into cluster_assembly.
+    """
+    if not cluster_assembly_rows:
+        return 0
+
+    sql = """
+    INSERT INTO cluster_assembly (
+        organism,
+        cluster_number,
+        centroid,
+        assembly,
+        segment,
+        n_sequences,
+        is_centroid_assembly
+    )
+    VALUES (
+        :organism,
+        :cluster_number,
+        :centroid,
+        :assembly,
+        :segment,
+        :n_sequences,
+        :is_centroid_assembly
+    )
+    ON CONFLICT(
+        organism,
+        cluster_number,
+        assembly,
+        segment
+    ) DO UPDATE SET
+        centroid = excluded.centroid,
+        n_sequences = excluded.n_sequences,
+        is_centroid_assembly = excluded.is_centroid_assembly;
+    """
+
+    conn.executemany(sql, cluster_assembly_rows)
+    conn.commit()
+
+    return len(cluster_assembly_rows)
+
+
+def load_cluster_assembly_links(conn, cluster_assembly_link_rows):
+    """
+    Load rows into cluster_assembly_links.
+    """
+    if not cluster_assembly_link_rows:
+        return 0
+
+    sql = """
+    INSERT INTO cluster_assembly_links (
+        organism,
+        cluster_number,
+        linked_organism,
+        linked_cluster_number,
+        linked_cluster_segment,
+        n_connections
+    )
+    VALUES (
+        :organism,
+        :cluster_number,
+        :linked_organism,
+        :linked_cluster_number,
+        :linked_cluster_segment,
+        :n_connections
+    )
+    ON CONFLICT(
+        organism,
+        cluster_number,
+        linked_organism,
+        linked_cluster_number
+    ) DO UPDATE SET
+        linked_cluster_segment = excluded.linked_cluster_segment,
+        n_connections = excluded.n_connections;
+    """
+
+    conn.executemany(sql, cluster_assembly_link_rows)
+    conn.commit()
+
+    return len(cluster_assembly_link_rows)
+
+
 def load_all_tables(
     db_path,
     metadata_rows,
@@ -2241,7 +2585,9 @@ def load_all_tables(
     cluster_summary_rows=None,
     cluster_background_count_rows=None,
     cluster_descriptor_rows=None,
-    cluster_filter_count_rows=None
+    cluster_filter_count_rows=None,
+    cluster_assembly_rows=None,
+    cluster_assembly_link_rows=None
 ):
     """
     Load all ETL-ready rows into the SQLite database.
@@ -2256,11 +2602,15 @@ def load_all_tables(
     6. cluster_background_counts
     7. cluster_descriptors
     8. cluster_filter_counts
+    9. cluster_assembly
+    10. cluster_assembly_links
     """
     cluster_summary_rows = cluster_summary_rows or []
     cluster_background_count_rows = cluster_background_count_rows or []
     cluster_descriptor_rows = cluster_descriptor_rows or []
     cluster_filter_count_rows = cluster_filter_count_rows or []
+    cluster_assembly_rows = cluster_assembly_rows or []
+    cluster_assembly_link_rows = cluster_assembly_link_rows or []
 
     conn = connect_sqlite(db_path)
 
@@ -2293,6 +2643,16 @@ def load_all_tables(
             cluster_filter_count_rows
         )
 
+        n_cluster_assembly = load_cluster_assembly(
+            conn,
+            cluster_assembly_rows
+        )
+
+        n_cluster_assembly_links = load_cluster_assembly_links(
+            conn,
+            cluster_assembly_link_rows
+        )
+
         summary = {
             "metadata": n_metadata,
             "sequences": n_sequences,
@@ -2302,6 +2662,8 @@ def load_all_tables(
             "cluster_background_counts": n_cluster_background_counts,
             "cluster_descriptors": n_cluster_descriptors,
             "cluster_filter_counts": n_cluster_filter_counts,
+            "cluster_assembly": n_cluster_assembly,
+            "cluster_assembly_links": n_cluster_assembly_links,
         }
 
         return summary
@@ -2696,6 +3058,86 @@ def load_cluster_filter_counts_no_commit(conn, cluster_filter_count_rows):
     conn.executemany(sql, cluster_filter_count_rows)
     return len(cluster_filter_count_rows)
 
+
+def load_cluster_assembly_no_commit(conn, cluster_assembly_rows):
+    """
+    Load rows into cluster_assembly without committing.
+    """
+    if not cluster_assembly_rows:
+        return 0
+
+    sql = """
+    INSERT INTO cluster_assembly (
+        organism,
+        cluster_number,
+        centroid,
+        assembly,
+        segment,
+        n_sequences,
+        is_centroid_assembly
+    )
+    VALUES (
+        :organism,
+        :cluster_number,
+        :centroid,
+        :assembly,
+        :segment,
+        :n_sequences,
+        :is_centroid_assembly
+    )
+    ON CONFLICT(
+        organism,
+        cluster_number,
+        assembly,
+        segment
+    ) DO UPDATE SET
+        centroid = excluded.centroid,
+        n_sequences = excluded.n_sequences,
+        is_centroid_assembly = excluded.is_centroid_assembly;
+    """
+
+    conn.executemany(sql, cluster_assembly_rows)
+    return len(cluster_assembly_rows)
+
+
+def load_cluster_assembly_links_no_commit(conn, cluster_assembly_link_rows):
+    """
+    Load rows into cluster_assembly_links without committing.
+    """
+    if not cluster_assembly_link_rows:
+        return 0
+
+    sql = """
+    INSERT INTO cluster_assembly_links (
+        organism,
+        cluster_number,
+        linked_organism,
+        linked_cluster_number,
+        linked_cluster_segment,
+        n_connections
+    )
+    VALUES (
+        :organism,
+        :cluster_number,
+        :linked_organism,
+        :linked_cluster_number,
+        :linked_cluster_segment,
+        :n_connections
+    )
+    ON CONFLICT(
+        organism,
+        cluster_number,
+        linked_organism,
+        linked_cluster_number
+    ) DO UPDATE SET
+        linked_cluster_segment = excluded.linked_cluster_segment,
+        n_connections = excluded.n_connections;
+    """
+
+    conn.executemany(sql, cluster_assembly_link_rows)
+    return len(cluster_assembly_link_rows)
+
+
 def load_all_tables_transactional(
     db_path,
     metadata_rows,
@@ -2705,7 +3147,9 @@ def load_all_tables_transactional(
     cluster_summary_rows=None,
     cluster_background_count_rows=None,
     cluster_descriptor_rows=None,
-    cluster_filter_count_rows=None
+    cluster_filter_count_rows=None,
+    cluster_assembly_rows=None,
+    cluster_assembly_link_rows=None
 ):
     """
     Load all ETL-ready rows into SQLite inside a single transaction.
@@ -2716,6 +3160,8 @@ def load_all_tables_transactional(
     cluster_background_count_rows = cluster_background_count_rows or []
     cluster_descriptor_rows = cluster_descriptor_rows or []
     cluster_filter_count_rows = cluster_filter_count_rows or []
+    cluster_assembly_rows = cluster_assembly_rows or []
+    cluster_assembly_link_rows = cluster_assembly_link_rows or []
 
     conn = connect_sqlite(db_path)
 
@@ -2750,6 +3196,16 @@ def load_all_tables_transactional(
             cluster_filter_count_rows
         )
 
+        n_cluster_assembly = load_cluster_assembly_no_commit(
+            conn,
+            cluster_assembly_rows
+        )
+
+        n_cluster_assembly_links = load_cluster_assembly_links_no_commit(
+            conn,
+            cluster_assembly_link_rows
+        )
+
         conn.commit()
 
         return {
@@ -2761,6 +3217,8 @@ def load_all_tables_transactional(
             "cluster_background_counts": n_cluster_background_counts,
             "cluster_descriptors": n_cluster_descriptors,
             "cluster_filter_counts": n_cluster_filter_counts,
+            "cluster_assembly": n_cluster_assembly,
+            "cluster_assembly_links": n_cluster_assembly_links,
         }
 
     except Exception:
@@ -2975,6 +3433,8 @@ def main():
     cluster_background_count_rows = derived_cluster_rows["cluster_background_counts"]
     cluster_descriptor_rows = derived_cluster_rows["cluster_descriptors"]
     cluster_filter_count_rows = derived_cluster_rows["cluster_filter_counts"]
+    cluster_assembly_rows = derived_cluster_rows["cluster_assembly"]
+    cluster_assembly_link_rows = derived_cluster_rows["cluster_assembly_links"]
 
     print("Transformation summary")
     print("----------------------")
@@ -2987,6 +3447,8 @@ def main():
     print(f"Cluster background count rows: {len(cluster_background_count_rows)}")
     print(f"Cluster descriptor rows: {len(cluster_descriptor_rows)}")
     print(f"Cluster filter count rows: {len(cluster_filter_count_rows)}")
+    print(f"Cluster assembly rows: {len(cluster_assembly_rows)}")
+    print(f"Cluster assembly link rows: {len(cluster_assembly_link_rows)}")
 
     validate_cross_references(
         metadata_rows=metadata_rows,
@@ -3058,6 +3520,13 @@ def main():
             organism=organism,
             mode="fail",
         )
+    else:
+        report_assembly_gaps(
+            compute_assembly_gaps(
+                metadata_rows=metadata_rows,
+                cluster_composition_rows=comp_rows,
+            )
+        )
 
     if missing_fasta and not args.fetch_missing:
         print(
@@ -3082,7 +3551,9 @@ def main():
             cluster_summary_rows=cluster_summary_rows,
             cluster_background_count_rows=cluster_background_count_rows,
             cluster_descriptor_rows=cluster_descriptor_rows,
-            cluster_filter_count_rows=cluster_filter_count_rows
+            cluster_filter_count_rows=cluster_filter_count_rows,
+            cluster_assembly_rows=cluster_assembly_rows,
+            cluster_assembly_link_rows=cluster_assembly_link_rows
         )
 
     elif args.load_mode == "transactional":
@@ -3095,7 +3566,9 @@ def main():
             cluster_summary_rows=cluster_summary_rows,
             cluster_background_count_rows=cluster_background_count_rows,
             cluster_descriptor_rows=cluster_descriptor_rows,
-            cluster_filter_count_rows=cluster_filter_count_rows
+            cluster_filter_count_rows=cluster_filter_count_rows,
+            cluster_assembly_rows=cluster_assembly_rows,
+            cluster_assembly_link_rows=cluster_assembly_link_rows
         )
 
     else:

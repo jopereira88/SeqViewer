@@ -156,7 +156,67 @@ input_data/
 | `cluster_background_counts` | Host/country/genotype counts per cluster |
 | `cluster_descriptors` | JSON value distributions, dominant values, and flags |
 | `cluster_filter_counts` | Precomputed filter combination counts |
+| `cluster_assembly` | Assemblies contributing to each cluster, with per-assembly member counts |
+| `cluster_assembly_links` | Precomputed cluster-to-cluster associations through shared assemblies |
 | `cluster_member_metadata` | Convenience view joining all member data |
+
+### Assembly associations
+
+`assembly` records the genome assembly each sequence came from. Two clusters
+are considered associated when they contain sequences from the same assembly,
+which is the signal that they may represent the same biological entity across
+separate submissions.
+
+Two derived tables back this:
+
+- `cluster_assembly` — one row per (cluster, segment, assembly) with
+  `n_sequences` and `is_centroid_assembly`.
+- `cluster_assembly_links` — one row per *unordered* cluster-cluster pair,
+  stored once with `n_connections` (the number of shared assemblies). The
+  smaller cluster key is stored first, so a lookup must consider both the
+  `cluster_number` and the `linked_cluster_number` side of every row.
+
+The ETL checks the invariant that every assembly contributes one cluster per
+segment; violations are reported by the record completeness check and are fatal
+under `--record-completeness fail`.
+
+**Why `assembly` is not in `cluster_filter_counts`.** That table's composite
+primary key would grow from ~114k to ~27M rows, because assembly cardinality is
+sequence-level. The assembly filter is therefore applied as an `EXISTS`
+semi-join against `cluster_assembly`, which composes with both the filtered and
+unfiltered cluster-search branches and leaves the filter chain untouched.
+
+In the Clusters tab, the **Search assembly** box restricts results to clusters
+containing sequences from assemblies matching the accession (partial matches
+allowed). Each result row carries `n_assemblies`, `dominant_assembly` and
+`assemblies_preview`. Selecting a cluster shows its contributing assemblies and
+the clusters linked to it, strongest link first. Link lookups are served from an
+in-memory index built once per database via `@st.cache_resource`.
+
+The **Generate metadata TSV zip** download covers all matching clusters with the
+active filters applied and produces two files: `clusters.tsv` (one row per
+cluster, including the assembly summary) and `members.tsv` (one row per
+sequence, including its assembly). FASTA headers from the cluster exports also
+carry `assembly=<accession>`.
+
+### Bulk download performance
+
+Exports that cover the whole dataset are large: over a million sequences and
+1.8 G bases. Two things keep them tractable.
+
+Cluster pair restrictions (the explicit list of clusters an export covers) are
+staged in a temp table and joined, rather than expanded into an `OR` chain over
+`(organism, cluster_number)`. The chain form reads as an index-friendly
+equality test but gives the planner a disjunction it can only satisfy with a
+full scan, so it cost minutes per export.
+
+Sequence and member rows are streamed straight from the cursor into the archive
+entry, instead of being collected into a dataframe first. `clusters.tsv` is
+still small enough (one row per cluster) to serialise as a dataframe. Streaming
+is what makes an unfiltered export possible: the dataframe form of the sequence
+export needs several gigabytes of RAM, against roughly 0.3 GB streamed.
+Compression is DEFLATE at the default level, which is slower than a low level
+but a good deal smaller (95 MB versus 137 MB for a full export).
 
 ## Project structure
 
@@ -173,13 +233,15 @@ seqviewer/
 │   └── ncbi_fetch.py           # Resumable NCBI sequence download CLI
 ├── services/
 │   ├── __init__.py
+│   ├── assembly_service.py      # Assembly associations + cached link index
 │   ├── cluster_service.py      # Cluster business logic
 │   ├── metadata_service.py     # Metadata/filter queries
 │   └── sequence_service.py     # Sequence queries
 ├── utils/
 │   ├── __init__.py
 │   ├── fasta.py                # FASTA formatting
-│   └── sequence_analysis.py    # Ambiguous base counting, accession parsing
+│   ├── sequence_analysis.py    # Ambiguous base counting, accession parsing
+│   └── tables.py               # TSV/CSV export and zipped table downloads
 ├── data/
 │   └── sequence_database.sqlite
 └── input_data/

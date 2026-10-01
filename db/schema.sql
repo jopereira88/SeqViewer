@@ -323,6 +323,115 @@ CREATE TABLE IF NOT EXISTS cluster_filter_counts (
 );
 
 -- ============================================================
+-- DERIVED TABLE: cluster_assembly
+-- ============================================================
+--
+-- Cluster <-> assembly association point.
+--
+-- One row per observed combination:
+--   organism
+--   cluster_number
+--   assembly
+--   segment
+--
+-- Every sequence in cluster_composition must belong to an assembly
+-- (the ETL reports sequences whose metadata assembly is missing).
+--
+-- An assembly spans one cluster per segment (8 clusters for both IAV
+-- and IBV), so assembly is a cluster-level association rather than a
+-- cluster attribute: filtering clusters by assembly yields at most
+-- one cluster per segment.
+--
+-- Important:
+--   assembly has sequence-level cardinality, so it is deliberately
+--   NOT part of cluster_filter_counts. Adding it to that table's
+--   composite PRIMARY KEY grows it from ~114K rows to ~27M rows for
+--   the shipped database. Assembly filtering is applied instead as an
+--   EXISTS semi-join against this table.
+--
+--   segment is normalised to 'Unknown' rather than NULL because it
+--   is part of the composite PRIMARY KEY.
+-- ============================================================
+
+CREATE TABLE IF NOT EXISTS cluster_assembly (
+    organism TEXT NOT NULL,
+    cluster_number TEXT NOT NULL,
+
+    centroid TEXT NOT NULL,
+
+    assembly TEXT NOT NULL DEFAULT 'Unknown',
+    segment TEXT NOT NULL DEFAULT 'Unknown',
+
+    n_sequences INTEGER NOT NULL DEFAULT 0 CHECK (n_sequences >= 0),
+
+    -- 1 when one of the contributing sequences is the cluster centroid.
+    is_centroid_assembly INTEGER NOT NULL DEFAULT 0 CHECK (is_centroid_assembly IN (0, 1)),
+
+    PRIMARY KEY (organism, cluster_number, assembly, segment),
+
+    FOREIGN KEY (organism, cluster_number)
+        REFERENCES clusters(organism, cluster_number)
+        ON UPDATE CASCADE
+        ON DELETE CASCADE,
+
+    FOREIGN KEY (centroid)
+        REFERENCES metadata(accession)
+        ON UPDATE CASCADE
+        ON DELETE RESTRICT
+);
+
+-- ============================================================
+-- DERIVED TABLE: cluster_assembly_links
+-- ============================================================
+--
+-- Cluster-to-cluster association table derived from shared assemblies.
+--
+-- One row per unique cluster-cluster link:
+--   organism / cluster_number      -- present cluster (lookup key)
+--   linked_organism /
+--   linked_cluster_number          -- linked cluster
+--   linked_cluster_segment         -- segment of the linked cluster
+--   n_connections                  -- number of shared assemblies
+--
+-- n_connections is the number of genomes both clusters are part of.
+-- A high value means the two clusters cover the same viral population,
+-- split across segments (n_connections reaches ~19K in the shipped
+-- database; the median cluster has exactly 7 links, one per other
+-- segment).
+--
+-- Each link is stored once, with the lexicographically smaller cluster
+-- key first, so the PRIMARY KEY is symmetric-safe and lookups never
+-- double-count. No self-links are stored.
+--
+-- linked_cluster_segment is denormalised (functionally determined by
+-- the linked cluster, which is always segment-pure) so this table is
+-- directly displayable.
+
+CREATE TABLE IF NOT EXISTS cluster_assembly_links (
+    organism TEXT NOT NULL,
+    cluster_number TEXT NOT NULL,
+
+    linked_organism TEXT NOT NULL,
+    linked_cluster_number TEXT NOT NULL,
+
+    linked_cluster_segment TEXT NOT NULL DEFAULT 'Unknown',
+
+    n_connections INTEGER NOT NULL DEFAULT 0 CHECK (n_connections >= 1),
+
+    PRIMARY KEY (organism, cluster_number, linked_organism, linked_cluster_number),
+
+    FOREIGN KEY (organism, cluster_number)
+        REFERENCES clusters(organism, cluster_number)
+        ON UPDATE CASCADE
+        ON DELETE CASCADE,
+
+    FOREIGN KEY (linked_organism, linked_cluster_number)
+        REFERENCES clusters(organism, cluster_number)
+        ON UPDATE CASCADE
+        ON DELETE CASCADE
+);
+
+-- ============================================================
 -- VIEW: cluster_member_metadata
 -- ============================================================
 --
@@ -584,3 +693,38 @@ ON cluster_filter_counts(segment, genotype, host, country);
 
 CREATE INDEX IF NOT EXISTS idx_cluster_filter_count
 ON cluster_filter_counts(n_sequences);
+
+-- ============================================================
+-- INDEXES: cluster_assembly
+-- ============================================================
+
+CREATE INDEX IF NOT EXISTS idx_cluster_assembly_assembly
+ON cluster_assembly(assembly);
+
+CREATE INDEX IF NOT EXISTS idx_cluster_assembly_assembly_segment
+ON cluster_assembly(assembly, segment);
+
+CREATE INDEX IF NOT EXISTS idx_cluster_assembly_assembly_cluster
+ON cluster_assembly(assembly, organism, cluster_number);
+
+CREATE INDEX IF NOT EXISTS idx_cluster_assembly_cluster
+ON cluster_assembly(organism, cluster_number);
+
+CREATE INDEX IF NOT EXISTS idx_cluster_assembly_cluster_segment
+ON cluster_assembly(organism, cluster_number, segment);
+
+CREATE INDEX IF NOT EXISTS idx_cluster_assembly_centroid
+ON cluster_assembly(centroid);
+
+-- ============================================================
+-- INDEXES: cluster_assembly_links
+-- ============================================================
+
+CREATE INDEX IF NOT EXISTS idx_cluster_assembly_links_cluster
+ON cluster_assembly_links(organism, cluster_number);
+
+CREATE INDEX IF NOT EXISTS idx_cluster_assembly_links_linked_cluster
+ON cluster_assembly_links(linked_organism, linked_cluster_number);
+
+CREATE INDEX IF NOT EXISTS idx_cluster_assembly_links_n_connections
+ON cluster_assembly_links(n_connections);
