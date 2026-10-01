@@ -28,3 +28,6 @@ input_data/
 # OS
 .DS_Store
 Thumbs.db
+
+# Local LLM agent handoff notes (machine-specific, never committed)
+SESSION_CONTEXT.md
