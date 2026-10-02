@@ -61,6 +61,24 @@ def count_ambiguous_bases(sequence):
     }
 
 
+def ambiguous_breakdown_json(per_base):
+    """
+    Serialise a per-base degenerate count mapping to JSON text.
+
+    Parameters
+    ----------
+    per_base : dict
+        Per-base counts, e.g. the "per_base" entry of
+        :func:`count_ambiguous_bases`.
+
+    Returns
+    -------
+    str
+        JSON object string, e.g. '{"R": 0, "Y": 1, ...}'.
+    """
+    return json.dumps(per_base, sort_keys=True)
+
+
 def degenerate_breakdown_json(sequence):
     """
     Serialise the per-base degenerate counts of a sequence to JSON text.
@@ -76,7 +94,7 @@ def degenerate_breakdown_json(sequence):
         JSON object string, e.g. '{"R": 0, "Y": 1, ...}'.
     """
     per_base = count_ambiguous_bases(sequence)["per_base"]
-    return json.dumps(per_base, sort_keys=True)
+    return ambiguous_breakdown_json(per_base)
 
 
 def parse_accession_list(text):

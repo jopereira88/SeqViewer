@@ -20,6 +20,7 @@ from utils.tables import (
 )
 from utils.sequence_analysis import (
     DEGENERATE_BASES,
+    ambiguous_breakdown_json,
     count_ambiguous_bases,
     degenerate_breakdown_json,
     parse_accession_list,
@@ -39,6 +40,7 @@ __all__ = [
     "cluster_metadata_zip_bytes_from_rows",
     "rows_to_tsv_stream",
     "DEGENERATE_BASES",
+    "ambiguous_breakdown_json",
     "count_ambiguous_bases",
     "degenerate_breakdown_json",
     "parse_accession_list",

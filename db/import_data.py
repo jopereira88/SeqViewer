@@ -46,32 +46,57 @@ import sys
 # importing the top-level 'utils' and 'db' packages.
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from utils.sequence_analysis import count_ambiguous_bases, degenerate_breakdown_json
+from utils.sequence_analysis import (
+    ambiguous_breakdown_json,
+    count_ambiguous_bases,
+)
 from db import ncbi_fetch
 
 ########## PARSER AND TRANSFORMER FUNCS ##################
+
+# Any residue that is not an accepted nucleotide becomes 'N'. The set matches
+# the IUPAC codes preserved by the parser; 'U' is normalised to 'T' beforehand.
+_NON_NUCLEOTIDE = re.compile(r'[^ACGTRYSWKMBDHVN]')
+
+
+def _normalise_sequence(sequence):
+    '''Uppercase, drop gaps, map U to T and replace anything else with N'''
+    sequence = sequence.upper().replace('-', '').replace('U', 'T')
+    return _NON_NUCLEOTIDE.sub('N', sequence)
+
+
 def seq_get(filename):
     '''Parses fasta file and returns accession numbers and sequences
     Accepts: filename -  a string for the path of the fasta file
     Returns: a dictonary with accession number and sequence
-    Raises:FileNotFoundError if file path is wrong'''
-    seqs={}
-    iupac_nucleotides = {'A', 'C', 'G', 'T', 'U', 'R', \
-                         'Y', 'S', 'W', 'K', 'M', 'B', 'D', 'H', 'V', 'N'}   
-    with open(filename,'r') as file:
-        fasta=file.readlines()
-    for i in range(len(fasta)):
-        if '>' in fasta[i]:
-            name=fasta[i].strip()
-            name=name.replace(';','_')
-            seqs[name]=''
-        else:
-            seqs[name]+=fasta[i].strip().upper().replace('-','').replace('X','N')
-    for key in seqs:
-        seqs[key]=seqs[key].replace('U','T')
-        for nuc in seqs[key]:
-            if nuc not in iupac_nucleotides:
-                seqs[key]=seqs[key].replace(nuc,'N')
+    Raises:FileNotFoundError if file path is wrong
+
+    The file is streamed one line at a time and each record is normalised as it
+    completes, so peak memory is proportional to the total sequence data rather
+    than to the file size plus an in-memory copy of every line.'''
+    seqs = {}
+    name = None
+    chunks = []
+
+    with open(filename, 'r') as file:
+        for line in file:
+            if '>' in line:
+                if name is not None:
+                    seqs[name] = _normalise_sequence(''.join(chunks))
+                name = line.strip().replace(';', '_')
+                chunks = []
+            else:
+                if name is None:
+                    raise ValueError(
+                        f'Sequence data before the first FASTA header in {filename}'
+                    )
+                chunk = line.strip()
+                if chunk:
+                    chunks.append(chunk)
+
+    if name is not None:
+        seqs[name] = _normalise_sequence(''.join(chunks))
+
     return seqs
 
 def parse_clstr(filename, access_only=True):
@@ -174,6 +199,31 @@ def join_fasta_dicts(acc_desc,acc_seq):
     table={}
     for acc in acc_desc:
         table[acc]=(acc_desc[acc],acc_seq[acc])
+    return table
+
+def build_sequence_table(fasta_dict, header_desc_sep=' |'):
+    """
+    Return a dictionary with accession: (description, sequence) from FASTA
+    records.
+
+    Equivalent to decompose_fasta_headers + accession_to_seq_dict +
+    join_fasta_dicts, but builds the result in a single pass so the two
+    intermediate dictionaries are never materialised. On a ~1M record FASTA
+    that is several hundred MB less peak memory.
+
+    Duplicate accessions keep the last occurrence of each, exactly as the
+    three-step version does.
+    """
+    table = {}
+
+    for header, seq in fasta_dict.items():
+        accession, description = split_fasta_header(
+            header,
+            header_desc_sep=header_desc_sep
+        )
+
+        table[accession] = (description, seq)
+
     return table
 
 def parse_clstr_member_line(line, header_desc_sep=' |'):
@@ -770,7 +820,7 @@ def transform_seqdict(seqdict):
             "sequence": sequence,
             "n_N": counts["n_N"],
             "n_degenerate": counts["n_degenerate"],
-            "degenerate_breakdown": degenerate_breakdown_json(sequence)
+            "degenerate_breakdown": ambiguous_breakdown_json(counts["per_base"])
         })
     return sequence_rows
 
@@ -3412,10 +3462,11 @@ def main():
                                      delimiter=args.metadata_delimiter)
     organism=infer_single_organism_from_metadata(metadata_rows)
     fasta_dict=seq_get(args.fasta)
-    acc_header=decompose_fasta_headers(fasta_dict)
-    acc_seq=accession_to_seq_dict(fasta_dict)
-    fasta_dict=join_fasta_dicts(acc_header,acc_seq)
+    fasta_dict=build_sequence_table(fasta_dict)
     sequence_rows=transform_seqdict(fasta_dict)
+    # The sequence table is no longer needed once the rows exist; release it
+    # before the cluster tables are built so the two never coexist.
+    del fasta_dict
     clusters=mine_clstr_table(args.clstr,organism)
     cluster_rows=transform_clustdict(clusters)
     comp_dict=mine_clstr_elements(args.clstr,organism)

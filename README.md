@@ -28,28 +28,54 @@ python3.13 -m venv .venv
 
 The app reads from `data/sequence_database.sqlite` by default. To use a different database, change the path in the sidebar.
 
-> The database must be built with the current schema: the `sequences` table stores
-> the ETL-precomputed ambiguous base counts (`n_N`, `n_degenerate`). Re-import the
-> database if it predates these columns.
+> The database must be built with the current schema. A quick way to check is to
+> confirm `cluster_assembly` and `cluster_assembly_links` exist — they are
+> derived at load time, so a database predating them cannot be used with the
+> cluster association features and must be re-imported:
+>
+> ```bash
+> sqlite3 data/sequence_database.sqlite \
+>     "select name from sqlite_master where type='table' and name like 'cluster_assembly%';"
+> ```
 
 ## Update the database
 
 The ETL pipeline reads raw metadata (CSV), sequences (FASTA), and CD-HIT clusters (.clstr), transforms them into a normalised schema, and loads everything into SQLite.
 
+> **One species per run, one database.** Each run handles a single organism —
+> `infer_single_organism_from_metadata` raises if the metadata contains more than
+> one. Run the first species with `--recreate` and every subsequent species
+> **without** it: loaders use plain `INSERT INTO`, so the run appends to the
+> existing database. Adding `--recreate` to a second species deletes the database
+> (`initialise_database` unlinks the file) and discards the species loaded first.
+
+> **Memory.** The pipeline transforms each source fully in memory before loading,
+> so peak RSS is driven by the FASTA and by the number of rows held at once, not
+> by the size of the output database. An IAV import (~995K sequences, 1.8 GB
+> FASTA) peaks at roughly 5 GB and takes about 5 minutes on 12 cores; budget
+> ~6 GB of available RAM or the run will fall back to swap and slow to a crawl.
+> The IBV import is far lighter (~83K sequences) and needs well under 1 GB.
+> Building into a throwaway path first (`--db data/tmp.sqlite`) is the safe way
+> to test a rebuild, since `--recreate` unlinks the target before loading.
+
 ### Influenza A virus (IAV)
+
+`--recreate` creates the database. Run this one first.
 
 ```bash
 .venv/bin/python db/import_data.py \
     --db data/sequence_database.sqlite \
     --schema db/schema.sql \
-    --metadata input_data/iav_metadata_0426.csv \
+    --metadata input_data/iav_metadata_0526.csv \
     --fasta input_data/iav_seq.fasta \
-    --clstr input_data/iav_clusters.clstr \
+    --clstr input_data/iav_sequences.clstr \
     --load-mode transactional \
     --recreate
 ```
 
 ### Influenza B virus (IBV)
+
+No `--recreate`: this appends IBV to the IAV database created above.
 
 ```bash
 .venv/bin/python db/import_data.py \
@@ -58,9 +84,24 @@ The ETL pipeline reads raw metadata (CSV), sequences (FASTA), and CD-HIT cluster
     --metadata input_data/ibv_sequences.csv \
     --fasta input_data/ibv_sequences.fasta \
     --clstr input_data/ibv_sequences.clstr \
-    --load-mode transactional \
-    --recreate
+    --load-mode transactional
 ```
+
+### Reusing previously fetched sequences
+
+Sequences downloaded from NCBI by `db/ncbi_fetch.py` are written to
+`data/fetched_sequences.fasta`, **not** to the original `--fasta` input. A
+re-import that points at `input_data/iav_seq.fasta` alone silently loses them and
+re-reports them as missing. Either concatenate them into the FASTA passed to
+`--fasta`:
+
+```bash
+cat input_data/iav_seq.fasta data/fetched_sequences.fasta > data/iav_full.fasta
+```
+
+or re-run the IAV import with `--fetch-missing --entrez-email you@example.org`,
+which resumes from `data/fetch_progress.json` and re-uses the already-downloaded
+sequences without re-fetching them.
 
 ### CLI options
 
@@ -116,13 +157,14 @@ behaviour.
 
 The fetched FASTA can be concatenated with the original file and passed to the
 ETL as `--fasta`, or the ETL can be run with `--fetch-missing` (which reuses the
-same resumable download).
+same resumable download). See
+[Reusing previously fetched sequences](#reusing-previously-fetched-sequences).
 
 ### Record completeness check
 
 The ETL checks that every sequence is present in all three sources *of the same
 species*: metadata, cluster composition and the FASTA file. Gaps are reported
-per species. Example output for the shipped database:
+per species. Example output when accessions are missing from the FASTA file:
 
 ```
 Record completeness gaps
@@ -136,9 +178,9 @@ Accessions missing a FASTA sequence: 4176
 
 ```
 input_data/
-├── iav_metadata_0426.csv    # IAV metadata (semicolon-delimited)
+├── iav_metadata_0526.csv    # IAV metadata (semicolon-delimited)
 ├── iav_seq.fasta            # IAV sequences
-├── iav_clusters.clstr       # IAV CD-HIT clusters
+├── iav_sequences.clstr      # IAV CD-HIT clusters
 ├── ibv_sequences.csv        # IBV metadata
 ├── ibv_sequences.fasta      # IBV sequences
 └── ibv_sequences.clstr      # IBV CD-HIT clusters
