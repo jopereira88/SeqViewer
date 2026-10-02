@@ -29,5 +29,9 @@ input_data/
 .DS_Store
 Thumbs.db
 
+# Windows NTFS alternate data streams, materialised as real files when the
+# project is unzipped on a Windows volume (WSL, Docker bind mounts)
+*:Zone.Identifier*
+
 # Local LLM agent handoff notes (machine-specific, never committed)
 SESSION_CONTEXT.md
