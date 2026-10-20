@@ -7,6 +7,7 @@ Supports **Influenza A virus (IAV)** (~1M sequences) and **Influenza B virus (IB
 Features:
 - Search the sequence index by accession / organism / species, filtered by metadata and by precomputed degenerate-base and N content.
 - **Multi-accession search**: enable the checkbox in the sidebar and paste a semicolon-separated list of accessions. Results show per-sequence `n_N` and `n_degenerate` counts and a per-base breakdown, and can be downloaded as a multifasta.
+- **Filtered multi-FASTA download**: generate a ZIP of every sequence matching the current filters, in results-table order. Downloads are capped at 25% of the database per file; larger result sets are produced in batches.
 - Cluster browser with pagination and bulk FASTA/ZIP downloads.
 
 ## Requirements

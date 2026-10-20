@@ -316,3 +316,61 @@ def build_cluster_zip_from_rows(cluster_keys, rows, line_width=80):
             )
 
     return buf.getvalue(), n_rows
+
+
+def build_multifasta_zip_from_rows(
+    rows,
+    line_width=80,
+    fasta_name="sequences.fasta",
+):
+    """
+    Build an in-memory zip holding one multifasta file, streaming rows.
+
+    Equivalent output to format_multifasta, but the sequences are consumed
+    one at a time and compressed incrementally instead of being joined into
+    a single string first. A whole-dataset export is over a million
+    sequences and roughly 1.9 GB of FASTA text, which cannot be held as one
+    string; writing through ZipFile.open() keeps memory to the compressed
+    buffer instead.
+
+    Parameters
+    ----------
+    rows : iterable[tuple]
+        (accession, description, assembly, sequence) rows, in the order
+        they should appear in the file.
+
+    line_width : int
+        Maximum line width for sequence wrapping.
+
+    fasta_name : str
+        Name of the fasta entry inside the zip.
+
+    Returns
+    -------
+    tuple[bytes, int]
+        Zip file contents and the number of sequence rows consumed.
+    """
+    buf = io.BytesIO()
+
+    n_rows = 0
+
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
+        # force_zip64 because the uncompressed entry can approach 2 GB,
+        # close enough to the ZIP32 4 GB limit that the size must not be
+        # guessed up front.
+        with zf.open(fasta_name, "w", force_zip64=True) as fh:
+            for accession, description, assembly, sequence in rows:
+                n_rows += 1
+
+                entry = _fasta_entry(
+                    accession=accession,
+                    description=description,
+                    sequence=sequence,
+                    line_width=line_width,
+                    assembly=assembly,
+                )
+
+                if entry:
+                    fh.write(entry.encode("utf-8"))
+
+    return buf.getvalue(), n_rows

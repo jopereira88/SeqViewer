@@ -7,6 +7,7 @@ from utils.fasta import (
     format_multifasta,
     build_cluster_zip,
     build_cluster_zip_from_rows,
+    build_multifasta_zip_from_rows,
 )
 from utils.tables import (
     df_to_delimited_bytes,
@@ -31,6 +32,7 @@ __all__ = [
     "format_multifasta",
     "build_cluster_zip",
     "build_cluster_zip_from_rows",
+    "build_multifasta_zip_from_rows",
     "df_to_delimited_bytes",
     "df_to_tsv_bytes",
     "df_to_csv_bytes",

@@ -35,6 +35,7 @@ def count_sequences(
     na_subtype_filter="All",
     host_filter="All",
     country_filter="All",
+    genbank_refseq_filter="All",
     min_degenerate=0,
     max_degenerate=None,
     min_n=0,
@@ -57,6 +58,7 @@ def count_sequences(
         na_subtype_filter=na_subtype_filter,
         host_filter=host_filter,
         country_filter=country_filter,
+        genbank_refseq_filter=genbank_refseq_filter,
         min_degenerate=min_degenerate,
         max_degenerate=max_degenerate,
         min_n=min_n,
@@ -76,6 +78,7 @@ def load_sequence_index(
     na_subtype_filter="All",
     host_filter="All",
     country_filter="All",
+    genbank_refseq_filter="All",
     min_degenerate=0,
     max_degenerate=None,
     min_n=0,
@@ -119,6 +122,9 @@ def load_sequence_index(
     country_filter : str
         Country filter or 'All'.
 
+    genbank_refseq_filter : str
+        GenBank / RefSeq filter or 'All'.
+
     min_degenerate : int
         Minimum number of degenerate bases (RYSWKMBDHV).
 
@@ -156,6 +162,7 @@ def load_sequence_index(
         na_subtype_filter=na_subtype_filter,
         host_filter=host_filter,
         country_filter=country_filter,
+        genbank_refseq_filter=genbank_refseq_filter,
         min_degenerate=min_degenerate,
         max_degenerate=max_degenerate,
         min_n=min_n,
@@ -163,6 +170,60 @@ def load_sequence_index(
         limit=limit,
         offset=offset,
         centroids_only=centroids_only,
+    )
+
+
+def iter_sequence_index_sequences(
+    db_path,
+    accession_search="",
+    organism_search="",
+    species_search="",
+    segment_filter="All",
+    genotype_filter="All",
+    ha_subtype_filter="All",
+    na_subtype_filter="All",
+    host_filter="All",
+    country_filter="All",
+    genbank_refseq_filter="All",
+    min_degenerate=0,
+    max_degenerate=None,
+    min_n=0,
+    max_n=None,
+    centroids_only=False,
+    limit=None,
+    offset=0,
+):
+    """
+    Yield filtered sequences one row at a time for bulk FASTA export.
+
+    Same rows, ordering and filters as load_sequence_index, but streamed
+    instead of collected into a dataframe. limit/offset slice the ordered
+    result so an export can be generated in batches.
+
+    Yields
+    ------
+    tuple
+        (accession, description, assembly, sequence).
+    """
+    return _q.iter_sequence_index_sequences(
+        db_path=db_path,
+        accession_search=accession_search,
+        organism_search=organism_search,
+        species_search=species_search,
+        segment_filter=segment_filter,
+        genotype_filter=genotype_filter,
+        ha_subtype_filter=ha_subtype_filter,
+        na_subtype_filter=na_subtype_filter,
+        host_filter=host_filter,
+        country_filter=country_filter,
+        genbank_refseq_filter=genbank_refseq_filter,
+        min_degenerate=min_degenerate,
+        max_degenerate=max_degenerate,
+        min_n=min_n,
+        max_n=max_n,
+        centroids_only=centroids_only,
+        limit=limit,
+        offset=offset,
     )
 
 
@@ -215,6 +276,7 @@ def load_sequence_records_by_accessions(
     na_subtype_filter="All",
     host_filter="All",
     country_filter="All",
+    genbank_refseq_filter="All",
     min_degenerate=0,
     max_degenerate=None,
     min_n=0,
@@ -251,6 +313,9 @@ def load_sequence_records_by_accessions(
     country_filter : str
         Country filter or 'All'.
 
+    genbank_refseq_filter : str
+        GenBank / RefSeq filter or 'All'.
+
     min_degenerate : int
         Minimum number of degenerate bases.
 
@@ -277,6 +342,7 @@ def load_sequence_records_by_accessions(
         na_subtype_filter=na_subtype_filter,
         host_filter=host_filter,
         country_filter=country_filter,
+        genbank_refseq_filter=genbank_refseq_filter,
         min_degenerate=min_degenerate,
         max_degenerate=max_degenerate,
         min_n=min_n,

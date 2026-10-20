@@ -54,4 +54,5 @@ def get_filter_options(db_path, table="metadata"):
         "na_subtype": get_distinct_values(db_path, table, "na_subtype"),
         "host": get_distinct_values(db_path, table, "host"),
         "country": get_distinct_values(db_path, table, "country"),
+        "genbank_refseq": get_distinct_values(db_path, table, "genbank_refseq"),
     }

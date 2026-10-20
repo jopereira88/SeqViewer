@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **GenBank / RefSeq sidebar metadata filter.** A new "GenBank / RefSeq"
+  selectbox in the Metadata filters section restricts the Sequences tab to
+  sequences whose `metadata.genbank_refseq` matches the selected value
+  (`All` for no filter). It applies to the sequence count, the paged index
+  and the multi-accession search, and is part of both Sequences-tab cache
+  keys so a change resets pagination. The Clusters tab deliberately ignores
+  it: the precomputed `cluster_filter_counts` rollup has no `genbank_refseq`
+  dimension, and adding one would require a full ETL rebuild. The selectbox
+  carries a help string stating the scope. Implemented by threading a
+  `genbank_refseq_filter` kwarg through `_append_metadata_filters`
+  (defaulting to `All`, so cluster callers are unaffected),
+  `_build_sequence_index_where`, `count_sequences`, `load_sequence_index`,
+  `load_sequence_records_by_accessions` and their service wrappers, plus
+  `get_filter_options`.
+- **Filtered multi-FASTA ZIP download for the Sequences tab.** A
+  "Generate multi-FASTA zip" button exports every sequence matching the
+  current filter state (search terms, metadata filters, ambiguous-base
+  limits, centroids-only) in results-table order, as a single
+  `sequences.fasta` inside a ZIP. Rows stream from the SQLite cursor into
+  the archive entry (`iter_sequence_index_sequences` +
+  `build_multifasta_zip_from_rows`), so a full export stays in the low
+  hundreds of megabytes instead of gigabytes. The generated payload is
+  held in session state and dropped whenever the filters change.
+  **No single download may cover more than 25% of the database**: above
+  that threshold the export is split into batches of at most a quarter of
+  the rows, with Previous/Next batch controls and per-batch generation.
+  The multi-accession search's multifasta download obeys the same cap,
+  batching over the in-memory result rows.
+
 ## [2026-10-02]
 
 ### Fixed

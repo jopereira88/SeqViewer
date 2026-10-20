@@ -401,12 +401,17 @@ def _append_metadata_filters(
     ha_subtype_filter="All",
     na_subtype_filter="All",
     host_filter="All",
-    country_filter="All"
+    country_filter="All",
+    genbank_refseq_filter="All",
 ):
     """
     Append metadata filters to a SQL query.
 
     This helper is used with base metadata or cluster_member_metadata.
+
+    genbank_refseq_filter is only applied by the sequence-level callers;
+    cluster callers leave it at the default so the cluster rollup tables,
+    which do not carry the column, are unaffected.
     """
     segment_filter = _normalise_filter_value(segment_filter)
     genotype_filter = _normalise_filter_value(genotype_filter)
@@ -414,6 +419,7 @@ def _append_metadata_filters(
     na_subtype_filter = _normalise_filter_value(na_subtype_filter)
     host_filter = _normalise_filter_value(host_filter)
     country_filter = _normalise_filter_value(country_filter)
+    genbank_refseq_filter = _normalise_filter_value(genbank_refseq_filter)
 
     if segment_filter != "All":
         query += f" AND {table_alias}.segment = ?"
@@ -438,6 +444,10 @@ def _append_metadata_filters(
     if country_filter != "All":
         query += f" AND {table_alias}.country = ?"
         params.append(country_filter)
+
+    if genbank_refseq_filter != "All":
+        query += f" AND {table_alias}.genbank_refseq = ?"
+        params.append(genbank_refseq_filter)
 
     return query, params
 
@@ -736,6 +746,7 @@ def _build_sequence_index_where(
     na_subtype_filter="All",
     host_filter="All",
     country_filter="All",
+    genbank_refseq_filter="All",
     min_degenerate=0,
     max_degenerate=None,
     min_n=0,
@@ -776,6 +787,7 @@ def _build_sequence_index_where(
         na_subtype_filter=na_subtype_filter,
         host_filter=host_filter,
         country_filter=country_filter,
+        genbank_refseq_filter=genbank_refseq_filter,
     )
     if meta_fragment:
         clauses.append(meta_fragment)
@@ -823,6 +835,7 @@ def count_sequences(
     na_subtype_filter="All",
     host_filter="All",
     country_filter="All",
+    genbank_refseq_filter="All",
     min_degenerate=0,
     max_degenerate=None,
     min_n=0,
@@ -844,6 +857,7 @@ def count_sequences(
         na_subtype_filter=na_subtype_filter,
         host_filter=host_filter,
         country_filter=country_filter,
+        genbank_refseq_filter=genbank_refseq_filter,
         min_degenerate=min_degenerate,
         max_degenerate=max_degenerate,
         min_n=min_n,
@@ -876,6 +890,7 @@ def load_sequence_index(
     na_subtype_filter="All",
     host_filter="All",
     country_filter="All",
+    genbank_refseq_filter="All",
     min_degenerate=0,
     max_degenerate=None,
     min_n=0,
@@ -921,6 +936,9 @@ def load_sequence_index(
     country_filter : str
         Country filter or 'All'.
 
+    genbank_refseq_filter : str
+        GenBank / RefSeq filter or 'All'.
+
     min_degenerate : int
         Minimum number of degenerate bases (RYSWKMBDHV) per sequence.
 
@@ -960,6 +978,7 @@ def load_sequence_index(
         na_subtype_filter=na_subtype_filter,
         host_filter=host_filter,
         country_filter=country_filter,
+        genbank_refseq_filter=genbank_refseq_filter,
         min_degenerate=min_degenerate,
         max_degenerate=max_degenerate,
         min_n=min_n,
@@ -1007,6 +1026,92 @@ def load_sequence_index(
     conn.close()
 
     return df
+
+
+def iter_sequence_index_sequences(
+    db_path,
+    accession_search="",
+    organism_search="",
+    species_search="",
+    segment_filter="All",
+    genotype_filter="All",
+    ha_subtype_filter="All",
+    na_subtype_filter="All",
+    host_filter="All",
+    country_filter="All",
+    genbank_refseq_filter="All",
+    min_degenerate=0,
+    max_degenerate=None,
+    min_n=0,
+    max_n=None,
+    centroids_only=False,
+    limit=None,
+    offset=0,
+):
+    """
+    Yield filtered sequences one row at a time for bulk FASTA export.
+
+    Same rows, ordering and filters as load_sequence_index, but the
+    sequences are never collected into a dataframe: a whole-dataset export
+    is over a million rows and 1.8 G bases, which needs gigabytes as a
+    dataframe. limit/offset slice the ordered result so an export can be
+    generated in batches.
+
+    Yields
+    ------
+    tuple
+        (accession, description, assembly, sequence).
+    """
+    where_fragment, params = _build_sequence_index_where(
+        accession_search=accession_search,
+        organism_search=organism_search,
+        species_search=species_search,
+        segment_filter=segment_filter,
+        genotype_filter=genotype_filter,
+        ha_subtype_filter=ha_subtype_filter,
+        na_subtype_filter=na_subtype_filter,
+        host_filter=host_filter,
+        country_filter=country_filter,
+        genbank_refseq_filter=genbank_refseq_filter,
+        min_degenerate=min_degenerate,
+        max_degenerate=max_degenerate,
+        min_n=min_n,
+        max_n=max_n,
+        centroids_only=centroids_only,
+    )
+
+    query = f"""
+        SELECT
+            m.accession,
+            s.description,
+            m.assembly,
+            s.sequence
+        {_SEQUENCE_INDEX_BASE_FROM}
+        WHERE 1 = 1 {where_fragment}
+        ORDER BY
+            m.organism_name,
+            m.segment,
+            m.accession
+    """
+
+    if limit is not None:
+        query += " LIMIT ? OFFSET ?"
+        params = params + [int(limit), int(offset)]
+    elif offset:
+        query += " LIMIT -1 OFFSET ?"
+        params = params + [int(offset)]
+
+    query += ";"
+
+    conn = sqlite3.connect(db_path)
+
+    try:
+        cursor = conn.execute(query, params)
+
+        for row in cursor:
+            yield row
+    finally:
+        conn.close()
 
 
 @st.cache_data(show_spinner=False)
@@ -1149,6 +1254,7 @@ def load_sequence_records_by_accessions(
     na_subtype_filter="All",
     host_filter="All",
     country_filter="All",
+    genbank_refseq_filter="All",
     min_degenerate=0,
     max_degenerate=None,
     min_n=0,
@@ -1186,6 +1292,9 @@ def load_sequence_records_by_accessions(
 
     country_filter : str
         Country filter or 'All'.
+
+    genbank_refseq_filter : str
+        GenBank / RefSeq filter or 'All'.
 
     min_degenerate : int
         Minimum number of degenerate bases.
@@ -1275,6 +1384,7 @@ def load_sequence_records_by_accessions(
             na_subtype_filter=na_subtype_filter,
             host_filter=host_filter,
             country_filter=country_filter,
+            genbank_refseq_filter=genbank_refseq_filter,
         )
 
         query, params = _append_ambiguous_base_filters(

@@ -22,6 +22,7 @@ from services import (
     load_sequence_detail,
     load_sequences_by_accessions,
     load_sequence_records_by_accessions,
+    iter_sequence_index_sequences,
     load_cluster_members,
     load_cluster_member_sequences,
     load_cluster_metadata_members_for_cluster_subset,
@@ -38,6 +39,7 @@ from utils import (
     format_multifasta,
     build_cluster_zip,
     build_cluster_zip_from_rows,
+    build_multifasta_zip_from_rows,
     cluster_metadata_zip_bytes_from_rows,
     parse_accession_list,
 )
@@ -339,6 +341,12 @@ country_filter = st.sidebar.selectbox(
     options=get_distinct_values(db_path, "metadata", "country")
 )
 
+genbank_refseq_filter = st.sidebar.selectbox(
+    "GenBank / RefSeq",
+    options=get_distinct_values(db_path, "metadata", "genbank_refseq"),
+    help="Applies to the Sequences tab only; the Clusters tab ignores this filter.",
+)
+
 st.sidebar.divider()
 
 # -- Sequence search filters --
@@ -512,6 +520,7 @@ with tab_sequences:
             na_subtype_filter,
             host_filter,
             country_filter,
+            genbank_refseq_filter,
             min_degenerate,
             max_degenerate,
             min_n,
@@ -521,6 +530,7 @@ with tab_sequences:
         if st.session_state.get("acc_key") != acc_cache_key:
             st.session_state["acc_key"] = acc_cache_key
             st.session_state.pop("acc_data", None)
+            st.session_state.pop("acc_export_batch", None)
 
         if "acc_data" not in st.session_state:
             with st.status(
@@ -546,6 +556,7 @@ with tab_sequences:
                     na_subtype_filter=na_subtype_filter,
                     host_filter=host_filter,
                     country_filter=country_filter,
+                    genbank_refseq_filter=genbank_refseq_filter,
                     min_degenerate=min_degenerate,
                     max_degenerate=max_degenerate,
                     min_n=min_n,
@@ -617,13 +628,84 @@ with tab_sequences:
                 "n_degenerate",
             ]
 
+            # The download is capped at 25% of the database: past that,
+            # offer the results in batches.
+            acc_total = len(records_df)
+            acc_export_cap = max(1, counts.get("metadata", 0) // 4)
+            acc_export_batches = max(1, -(-acc_total // acc_export_cap))
+
+            if acc_export_batches > 1:
+                acc_export_batch = int(
+                    st.session_state.get("acc_export_batch", 0)
+                )
+                acc_export_batch = min(
+                    max(acc_export_batch, 0), acc_export_batches - 1
+                )
+                st.session_state["acc_export_batch"] = acc_export_batch
+
+                st.caption(
+                    f"The result is {acc_total} sequences, more than 25% of the "
+                    f"database ({counts.get('metadata', 0)}). Downloads are split "
+                    f"into {acc_export_batches} batches of at most "
+                    f"{acc_export_cap} sequences."
+                )
+
+                batch_nav_cols = st.columns(2)
+
+                with batch_nav_cols[0]:
+                    if st.button(
+                        "Previous batch",
+                        disabled=(acc_export_batch == 0),
+                        key="acc_export_prev",
+                    ):
+                        st.session_state["acc_export_batch"] = (
+                            acc_export_batch - 1
+                        )
+                        st.rerun()
+
+                with batch_nav_cols[1]:
+                    if st.button(
+                        "Next batch",
+                        disabled=(acc_export_batch >= acc_export_batches - 1),
+                        key="acc_export_next",
+                    ):
+                        st.session_state["acc_export_batch"] = (
+                            acc_export_batch + 1
+                        )
+                        st.rerun()
+
+                acc_export_batch = st.session_state["acc_export_batch"]
+                acc_batch_label = (
+                    f"batch {acc_export_batch + 1} of {acc_export_batches}"
+                )
+            else:
+                acc_export_batch = 0
+                acc_batch_label = None
+
+            acc_export_offset = acc_export_batch * acc_export_cap
+            acc_export_slice = records_df.iloc[
+                acc_export_offset : acc_export_offset + acc_export_cap
+            ]
+
+            acc_download_label = (
+                f"Download displayed sequences as multifasta "
+                f"({len(acc_export_slice)} sequences"
+            )
+
+            if acc_batch_label:
+                acc_download_label += f", {acc_batch_label}"
+
+            acc_download_label += ")"
+
             st.download_button(
-                label=(
-                    f"Download displayed sequences as multifasta "
-                    f"({len(records_df)} sequences)"
+                label=acc_download_label,
+                data=format_multifasta(acc_export_slice),
+                file_name=(
+                    f"accession_list_"
+                    f"{acc_batch_label.replace(' ', '_')}.fasta"
+                    if acc_batch_label
+                    else "accession_list.fasta"
                 ),
-                data=format_multifasta(records_df),
-                file_name="accession_list.fasta",
                 mime="text/plain",
             )
 
@@ -684,6 +766,7 @@ with tab_sequences:
             na_subtype_filter=na_subtype_filter,
             host_filter=host_filter,
             country_filter=country_filter,
+            genbank_refseq_filter=genbank_refseq_filter,
             min_degenerate=min_degenerate,
             max_degenerate=max_degenerate,
             min_n=min_n,
@@ -703,7 +786,8 @@ with tab_sequences:
         seq_filter_key = (
             db_path, accession_search, organism_search, species_search,
             segment_filter, genotype_filter, ha_subtype_filter,
-            na_subtype_filter, host_filter, country_filter,
+            na_subtype_filter,             host_filter, country_filter,
+            genbank_refseq_filter,
             min_degenerate, max_degenerate, min_n, max_n,
             centroids_only, seq_page_size,
         )
@@ -712,6 +796,9 @@ with tab_sequences:
             st.session_state.seq_page = 0
             st.session_state["seq_filter_key"] = seq_filter_key
             st.session_state.pop("seq_detail_accession", None)
+            st.session_state.pop("seq_export_batch", None)
+            st.session_state.pop("seq_fasta_zip", None)
+            st.session_state.pop("seq_fasta_zip_info", None)
 
         st.session_state.seq_page = current_page
         offset = current_page * seq_page_size
@@ -737,6 +824,127 @@ with tab_sequences:
                 st.session_state.seq_page += 1
                 st.rerun()
 
+        # -- Multi-FASTA export of the whole filtered set --
+        #
+        # No single download may cover more than 25% of the database. When
+        # the filtered set is larger, it is generated and downloaded in
+        # batches of at most a quarter of the rows.
+
+        db_total_sequences = counts.get("metadata", 0)
+        export_cap = max(1, db_total_sequences // 4)
+        export_batches = max(1, -(-total_sequences // export_cap))
+
+        if export_batches > 1:
+            export_batch = int(st.session_state.get("seq_export_batch", 0))
+            export_batch = min(max(export_batch, 0), export_batches - 1)
+            st.session_state["seq_export_batch"] = export_batch
+
+            st.caption(
+                f"The filtered set is {total_sequences} sequences, more than 25% of "
+                f"the database ({db_total_sequences}). Downloads are split into "
+                f"{export_batches} batches of at most {export_cap} sequences."
+            )
+        else:
+            export_batch = 0
+
+        export_offset = export_batch * export_cap
+        export_count = min(export_cap, max(total_sequences - export_offset, 0))
+        export_batch_label = f"batch {export_batch + 1} of {export_batches}"
+
+        export_cols = st.columns([1, 1, 2])
+
+        with export_cols[0]:
+            if export_batches > 1:
+                prev_col, next_col = st.columns(2)
+
+                with prev_col:
+                    if st.button(
+                        "Previous batch",
+                        disabled=(export_batch == 0),
+                        key="seq_export_prev",
+                    ):
+                        st.session_state["seq_export_batch"] = export_batch - 1
+                        st.session_state.pop("seq_fasta_zip", None)
+                        st.session_state.pop("seq_fasta_zip_info", None)
+                        st.rerun()
+
+                with next_col:
+                    if st.button(
+                        "Next batch",
+                        disabled=(export_batch >= export_batches - 1),
+                        key="seq_export_next",
+                    ):
+                        st.session_state["seq_export_batch"] = export_batch + 1
+                        st.session_state.pop("seq_fasta_zip", None)
+                        st.session_state.pop("seq_fasta_zip_info", None)
+                        st.rerun()
+
+        with export_cols[1]:
+            generate_label = f"Generate multi-FASTA zip ({export_count} sequences"
+
+            if export_batches > 1:
+                generate_label += f", {export_batch_label}"
+
+            generate_label += ")"
+
+            if st.button(
+                generate_label,
+                key="gen_seq_fasta_zip",
+                disabled=(export_count <= 0),
+            ):
+                with st.status(
+                    "Generating multi-FASTA zip...", expanded=False
+                ) as status:
+                    zip_bytes, n_sequences = build_multifasta_zip_from_rows(
+                        rows=iter_sequence_index_sequences(
+                            db_path=db_path,
+                            accession_search=accession_search,
+                            organism_search=organism_search,
+                            species_search=species_search,
+                            segment_filter=segment_filter,
+                            genotype_filter=genotype_filter,
+                            ha_subtype_filter=ha_subtype_filter,
+                            na_subtype_filter=na_subtype_filter,
+                            host_filter=host_filter,
+                            country_filter=country_filter,
+                            genbank_refseq_filter=genbank_refseq_filter,
+                            min_degenerate=min_degenerate,
+                            max_degenerate=max_degenerate,
+                            min_n=min_n,
+                            max_n=max_n,
+                            centroids_only=centroids_only,
+                            limit=export_count,
+                            offset=export_offset,
+                        ),
+                    )
+
+                export_info = f"{n_sequences} sequences"
+
+                if export_batches > 1:
+                    export_info += f", {export_batch_label}"
+
+                st.session_state["seq_fasta_zip"] = zip_bytes
+                st.session_state["seq_fasta_zip_info"] = export_info
+                status.update(label=f"Zip ready: {export_info}", state="complete")
+
+        with export_cols[2]:
+            if "seq_fasta_zip" in st.session_state:
+                st.download_button(
+                    label=(
+                        "Download multi-FASTA zip "
+                        f"({st.session_state['seq_fasta_zip_info']})"
+                    ),
+                    data=st.session_state["seq_fasta_zip"],
+                    file_name=(
+                        f"filtered_sequences_"
+                        f"{export_batch_label.replace(' ', '_')}.zip"
+                        if export_batches > 1
+                        else "filtered_sequences.zip"
+                    ),
+                    mime="application/zip",
+                    key="dl_seq_fasta_zip",
+                )
+
         # -- Load current page only --
 
         is_download_mode = selection_mode == "Download (multi-select)"
@@ -752,6 +960,7 @@ with tab_sequences:
             na_subtype_filter=na_subtype_filter,
             host_filter=host_filter,
             country_filter=country_filter,
+            genbank_refseq_filter=genbank_refseq_filter,
             min_degenerate=min_degenerate,
             max_degenerate=max_degenerate,
             min_n=min_n,
