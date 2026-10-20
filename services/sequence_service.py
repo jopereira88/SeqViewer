@@ -36,6 +36,7 @@ def count_sequences(
     host_filter="All",
     country_filter="All",
     genbank_refseq_filter="All",
+    assembly_filter=(),
     min_degenerate=0,
     max_degenerate=None,
     min_n=0,
@@ -59,6 +60,7 @@ def count_sequences(
         host_filter=host_filter,
         country_filter=country_filter,
         genbank_refseq_filter=genbank_refseq_filter,
+        assembly_filter=assembly_filter,
         min_degenerate=min_degenerate,
         max_degenerate=max_degenerate,
         min_n=min_n,
@@ -79,6 +81,7 @@ def load_sequence_index(
     host_filter="All",
     country_filter="All",
     genbank_refseq_filter="All",
+    assembly_filter=(),
     min_degenerate=0,
     max_degenerate=None,
     min_n=0,
@@ -125,6 +128,10 @@ def load_sequence_index(
     genbank_refseq_filter : str
         GenBank / RefSeq filter or 'All'.
 
+    assembly_filter : tuple[str, ...]
+        Exact assembly accessions to match against metadata.assembly;
+        empty tuple for no filter.
+
     min_degenerate : int
         Minimum number of degenerate bases (RYSWKMBDHV).
 
@@ -163,6 +170,7 @@ def load_sequence_index(
         host_filter=host_filter,
         country_filter=country_filter,
         genbank_refseq_filter=genbank_refseq_filter,
+        assembly_filter=assembly_filter,
         min_degenerate=min_degenerate,
         max_degenerate=max_degenerate,
         min_n=min_n,
@@ -185,6 +193,7 @@ def iter_sequence_index_sequences(
     host_filter="All",
     country_filter="All",
     genbank_refseq_filter="All",
+    assembly_filter=(),
     min_degenerate=0,
     max_degenerate=None,
     min_n=0,
@@ -217,6 +226,7 @@ def iter_sequence_index_sequences(
         host_filter=host_filter,
         country_filter=country_filter,
         genbank_refseq_filter=genbank_refseq_filter,
+        assembly_filter=assembly_filter,
         min_degenerate=min_degenerate,
         max_degenerate=max_degenerate,
         min_n=min_n,
@@ -277,6 +287,7 @@ def load_sequence_records_by_accessions(
     host_filter="All",
     country_filter="All",
     genbank_refseq_filter="All",
+    assembly_filter=(),
     min_degenerate=0,
     max_degenerate=None,
     min_n=0,
@@ -316,6 +327,10 @@ def load_sequence_records_by_accessions(
     genbank_refseq_filter : str
         GenBank / RefSeq filter or 'All'.
 
+    assembly_filter : tuple[str, ...]
+        Exact assembly accessions to match against metadata.assembly;
+        empty tuple for no filter.
+
     min_degenerate : int
         Minimum number of degenerate bases.
 
@@ -343,6 +358,7 @@ def load_sequence_records_by_accessions(
         host_filter=host_filter,
         country_filter=country_filter,
         genbank_refseq_filter=genbank_refseq_filter,
+        assembly_filter=assembly_filter,
         min_degenerate=min_degenerate,
         max_degenerate=max_degenerate,
         min_n=min_n,

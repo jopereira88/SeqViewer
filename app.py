@@ -347,6 +347,33 @@ genbank_refseq_filter = st.sidebar.selectbox(
     help="Applies to the Sequences tab only; the Clusters tab ignores this filter.",
 )
 
+multiple_assemblies = st.sidebar.checkbox(
+    "Search multiple assemblies (semicolon-separated)",
+    value=False,
+    help=(
+        "Paste a list of assembly accessions separated by semicolons (;). "
+        "Commas, newlines and whitespace are also accepted. "
+        "Applies to the Sequences tab only; the Clusters tab has its "
+        "own assembly search."
+    ),
+)
+
+if multiple_assemblies:
+    assembly_input_text = st.sidebar.text_area(
+        "Assembly list",
+        value="",
+        placeholder="GCF_001343785.1; GCA_000001405.1; ...",
+        height=140,
+    )
+else:
+    assembly_input_text = st.sidebar.text_input(
+        "Assembly",
+        value="",
+        help="Exact assembly accession (e.g. GCF_001343785.1).",
+    )
+
+assembly_filter = tuple(parse_accession_list(assembly_input_text))
+
 st.sidebar.divider()
 
 # -- Sequence search filters --
@@ -521,6 +548,7 @@ with tab_sequences:
             host_filter,
             country_filter,
             genbank_refseq_filter,
+            assembly_filter,
             min_degenerate,
             max_degenerate,
             min_n,
@@ -557,6 +585,7 @@ with tab_sequences:
                     host_filter=host_filter,
                     country_filter=country_filter,
                     genbank_refseq_filter=genbank_refseq_filter,
+                    assembly_filter=assembly_filter,
                     min_degenerate=min_degenerate,
                     max_degenerate=max_degenerate,
                     min_n=min_n,
@@ -767,6 +796,7 @@ with tab_sequences:
             host_filter=host_filter,
             country_filter=country_filter,
             genbank_refseq_filter=genbank_refseq_filter,
+            assembly_filter=assembly_filter,
             min_degenerate=min_degenerate,
             max_degenerate=max_degenerate,
             min_n=min_n,
@@ -788,6 +818,7 @@ with tab_sequences:
             segment_filter, genotype_filter, ha_subtype_filter,
             na_subtype_filter,             host_filter, country_filter,
             genbank_refseq_filter,
+            assembly_filter,
             min_degenerate, max_degenerate, min_n, max_n,
             centroids_only, seq_page_size,
         )
@@ -908,6 +939,7 @@ with tab_sequences:
                             host_filter=host_filter,
                             country_filter=country_filter,
                             genbank_refseq_filter=genbank_refseq_filter,
+                            assembly_filter=assembly_filter,
                             min_degenerate=min_degenerate,
                             max_degenerate=max_degenerate,
                             min_n=min_n,
@@ -961,6 +993,7 @@ with tab_sequences:
             host_filter=host_filter,
             country_filter=country_filter,
             genbank_refseq_filter=genbank_refseq_filter,
+            assembly_filter=assembly_filter,
             min_degenerate=min_degenerate,
             max_degenerate=max_degenerate,
             min_n=min_n,

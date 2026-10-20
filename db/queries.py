@@ -403,6 +403,7 @@ def _append_metadata_filters(
     host_filter="All",
     country_filter="All",
     genbank_refseq_filter="All",
+    assembly_filter=(),
 ):
     """
     Append metadata filters to a SQL query.
@@ -412,6 +413,10 @@ def _append_metadata_filters(
     genbank_refseq_filter is only applied by the sequence-level callers;
     cluster callers leave it at the default so the cluster rollup tables,
     which do not carry the column, are unaffected.
+
+    assembly_filter is a tuple of exact assembly accessions; it follows the
+    same convention, so cluster callers that leave it at the default are
+    unaffected.
     """
     segment_filter = _normalise_filter_value(segment_filter)
     genotype_filter = _normalise_filter_value(genotype_filter)
@@ -448,6 +453,30 @@ def _append_metadata_filters(
     if genbank_refseq_filter != "All":
         query += f" AND {table_alias}.genbank_refseq = ?"
         params.append(genbank_refseq_filter)
+
+    if isinstance(assembly_filter, str):
+        assembly_filter = (
+            ()
+            if _normalise_filter_value(assembly_filter) == "All"
+            else (assembly_filter,)
+        )
+
+    assembly_entries = []
+    seen_assemblies = set()
+
+    for entry in assembly_filter or ():
+        entry = str(entry).strip()
+
+        if not entry or entry in seen_assemblies:
+            continue
+
+        seen_assemblies.add(entry)
+        assembly_entries.append(entry)
+
+    if assembly_entries:
+        placeholders = ", ".join(["?"] * len(assembly_entries))
+        query += f" AND {table_alias}.assembly IN ({placeholders})"
+        params.extend(assembly_entries)
 
     return query, params
 
@@ -747,6 +776,7 @@ def _build_sequence_index_where(
     host_filter="All",
     country_filter="All",
     genbank_refseq_filter="All",
+    assembly_filter=(),
     min_degenerate=0,
     max_degenerate=None,
     min_n=0,
@@ -788,6 +818,7 @@ def _build_sequence_index_where(
         host_filter=host_filter,
         country_filter=country_filter,
         genbank_refseq_filter=genbank_refseq_filter,
+        assembly_filter=assembly_filter,
     )
     if meta_fragment:
         clauses.append(meta_fragment)
@@ -836,6 +867,7 @@ def count_sequences(
     host_filter="All",
     country_filter="All",
     genbank_refseq_filter="All",
+    assembly_filter=(),
     min_degenerate=0,
     max_degenerate=None,
     min_n=0,
@@ -858,6 +890,7 @@ def count_sequences(
         host_filter=host_filter,
         country_filter=country_filter,
         genbank_refseq_filter=genbank_refseq_filter,
+        assembly_filter=assembly_filter,
         min_degenerate=min_degenerate,
         max_degenerate=max_degenerate,
         min_n=min_n,
@@ -891,6 +924,7 @@ def load_sequence_index(
     host_filter="All",
     country_filter="All",
     genbank_refseq_filter="All",
+    assembly_filter=(),
     min_degenerate=0,
     max_degenerate=None,
     min_n=0,
@@ -939,6 +973,10 @@ def load_sequence_index(
     genbank_refseq_filter : str
         GenBank / RefSeq filter or 'All'.
 
+    assembly_filter : tuple[str, ...]
+        Exact assembly accessions to match against metadata.assembly;
+        empty tuple for no filter.
+
     min_degenerate : int
         Minimum number of degenerate bases (RYSWKMBDHV) per sequence.
 
@@ -979,6 +1017,7 @@ def load_sequence_index(
         host_filter=host_filter,
         country_filter=country_filter,
         genbank_refseq_filter=genbank_refseq_filter,
+        assembly_filter=assembly_filter,
         min_degenerate=min_degenerate,
         max_degenerate=max_degenerate,
         min_n=min_n,
@@ -1040,6 +1079,7 @@ def iter_sequence_index_sequences(
     host_filter="All",
     country_filter="All",
     genbank_refseq_filter="All",
+    assembly_filter=(),
     min_degenerate=0,
     max_degenerate=None,
     min_n=0,
@@ -1073,6 +1113,7 @@ def iter_sequence_index_sequences(
         host_filter=host_filter,
         country_filter=country_filter,
         genbank_refseq_filter=genbank_refseq_filter,
+        assembly_filter=assembly_filter,
         min_degenerate=min_degenerate,
         max_degenerate=max_degenerate,
         min_n=min_n,
@@ -1255,6 +1296,7 @@ def load_sequence_records_by_accessions(
     host_filter="All",
     country_filter="All",
     genbank_refseq_filter="All",
+    assembly_filter=(),
     min_degenerate=0,
     max_degenerate=None,
     min_n=0,
@@ -1295,6 +1337,12 @@ def load_sequence_records_by_accessions(
 
     genbank_refseq_filter : str
         GenBank / RefSeq filter or 'All'.
+
+    assembly_filter : tuple[str, ...]
+        Exact assembly accessions to match against metadata.assembly;
+        empty tuple for no filter. Each entry adds a query parameter on
+        top of the 900-accession chunk; the bundled SQLite accepts up to
+        32,766 parameters.
 
     min_degenerate : int
         Minimum number of degenerate bases.
@@ -1385,6 +1433,7 @@ def load_sequence_records_by_accessions(
             host_filter=host_filter,
             country_filter=country_filter,
             genbank_refseq_filter=genbank_refseq_filter,
+            assembly_filter=assembly_filter,
         )
 
         query, params = _append_ambiguous_base_filters(

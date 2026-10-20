@@ -37,6 +37,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the rows, with Previous/Next batch controls and per-batch generation.
   The multi-accession search's multifasta download obeys the same cap,
   batching over the in-memory result rows.
+- **Assembly sidebar metadata filter (multi-entry).** A new "Assembly" field
+  in the Metadata filters section restricts the Sequences tab to sequences
+  whose `metadata.assembly` matches one of the supplied accessions exactly
+  (SQL `IN`, served by `idx_metadata_assembly`). A checkbox toggles between
+  a single-value text input and a pasteable textarea; both accept
+  semicolon/comma/newline/whitespace-separated entries, parsed with the
+  existing `parse_accession_list` helper into a deduplicated tuple. The
+  filter is threaded through `_append_metadata_filters` (as
+  `assembly_filter`, defaulting to an empty tuple, so cluster callers are
+  unaffected), `_build_sequence_index_where`, `count_sequences`,
+  `load_sequence_index`, `iter_sequence_index_sequences`,
+  `load_sequence_records_by_accessions` and their service wrappers, and is
+  part of both Sequences-tab cache keys (`seq_filter_key`, `acc_cache_key`)
+  so a change resets pagination and clears stale downloads. The Clusters tab
+  deliberately keeps its own single-value in-tab assembly search: assembly
+  is absent from `cluster_filter_counts` (its cardinality is sequence-level,
+  see schema.sql) and is instead applied there as an `EXISTS` semi-join
+  against `cluster_assembly`.
 
 ## [2026-10-02]
 
